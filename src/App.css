@@ -1,5 +1,6 @@
 .App {
   text-align: center;
+  padding: 20px;
 }
 
 .App-logo {
@@ -35,4 +36,43 @@
   to {
     transform: rotate(360deg);
   }
+}
+
+.event-dot {
+  background-color: #FF5733; /* Choose any color you prefer */
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin: 0 auto;
+  position: relative;
+  top: 2px;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 20px;
+  margin-top: 20px;
+}
+
+.calendar-item {
+  background-color: #f9f9f9;
+  padding: 15px;
+  border-radius: 8px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+.calendar-item h2 {
+  margin-bottom: 10px;
+}
+
+.calendar-item .react-calendar {
+  width: 100%;
+  border: none;
+  border-radius: 8px;
+}
+
+.calendar-item .react-calendar__tile--active {
+  background-color: #61dafb !important;
+  color: white !important;
 }
