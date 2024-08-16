@@ -19,6 +19,11 @@ function CalendarSection({ calendarId, calendarName, session }) {
   useEffect(() => {
     if (session) {
       fetchEvents();
+      fetchAirtableEvents().then(airtableEvents => {
+        airtableEvents.forEach(event => {
+          patchGoogleCalendarEvent(event);
+        });
+      });
     }
   }, [session]);
 
@@ -64,6 +69,53 @@ function CalendarSection({ calendarId, calendarName, session }) {
     if (data.nextPageToken) {
       fetchEvents(data.nextPageToken);
     }
+  }
+
+  async function fetchAirtableEvents() {
+    const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tblFyuJwQTmSsXav7`;
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+    return data.records.map(record => ({
+      id: record.id,
+      title: record.fields.Title,
+      start: new Date(record.fields.Start),
+      end: new Date(record.fields.End),
+      description: record.fields.Description,
+      googleEventId: record.fields.GoogleEventId // Assuming you store the Google Event ID in Airtable
+    }));
+  }
+
+  async function patchGoogleCalendarEvent(event) {
+    const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${event.googleEventId}`;
+    
+    const updatedEvent = {
+      summary: event.title,
+      description: event.description,
+      start: { dateTime: event.start.toISOString() },
+      end: { dateTime: event.end.toISOString() },
+    };
+
+    await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': 'Bearer ' + session.provider_token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(updatedEvent)
+    }).then(response => response.json())
+      .then(data => {
+        if (data.error) {
+          console.error('Error updating event:', data.error);
+        } else {
+          console.log('Event updated:', data);
+        }
+      });
   }
 
   function handleDateClick(date) {
