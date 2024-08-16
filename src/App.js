@@ -5,6 +5,50 @@ import DateTimePicker from 'react-datetime-picker';
 import Calendar from 'react-calendar';
 import 'react-calendar/dist/Calendar.css';
 
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function patchGoogleCalendarEvent(event, calendarId, session) {
+  if (!event.googleEventId) {
+    console.error('No googleEventId found for event:', event);
+    return; // Exit early if googleEventId is undefined
+  }
+
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${event.googleEventId}`;
+  console.log('Patching event:', event);
+
+  const updatedEvent = {
+    summary: event.title,
+    description: event.description,
+    start: { dateTime: event.start.toISOString() },
+    end: { dateTime: event.end.toISOString() },
+    location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
+  };
+
+  await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': 'Bearer ' + session.provider_token,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(updatedEvent)
+  }).then(response => response.json())
+    .then(async data => {
+      if (data.error) {
+        console.error('Error updating event:', data.error);
+        if (data.error.status === "PERMISSION_DENIED" && data.error.message.includes('Quota exceeded')) {
+          console.log('Rate limit exceeded, retrying after delay...');
+          await delay(10000); // Wait for 10 seconds
+          return patchGoogleCalendarEvent(event, calendarId, session); // Retry the request
+        }
+      } else {
+        console.log('Event updated:', data);
+      }
+    });
+}
+
+
 function CalendarSection({ calendarId, calendarName, session }) {
   const [start, setStart] = useState(new Date());
   const [end, setEnd] = useState(new Date());
@@ -21,7 +65,7 @@ function CalendarSection({ calendarId, calendarName, session }) {
       fetchEvents();
       fetchAirtableEvents().then(airtableEvents => {
         airtableEvents.forEach(event => {
-          patchGoogleCalendarEvent(event);
+          patchGoogleCalendarEvent(event, calendarId, session);
         });
       });
     }
@@ -71,9 +115,15 @@ function CalendarSection({ calendarId, calendarName, session }) {
     }
   }
 
-  async function fetchAirtableEvents() { const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`; const response = await fetch(url, { headers: { 'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238', 'Content-Type': 'application/json' } });
-
-
+  async function fetchAirtableEvents() {
+    const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`;
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json'
+      }
+    });
+  
     const data = await response.json();
     return data.records.map(record => ({
       id: record.id,
@@ -90,37 +140,10 @@ function CalendarSection({ calendarId, calendarName, session }) {
       picturesOfIssue: record.fields['Picture(s) of Issue'],
       calendarLink: record.fields['Calendar Link'],
       vendorEmail: record.fields['Vendor Email'],
-      googleEventId: record.fields['GoogleEventId'] // Assuming this is in Airtable
+      googleEventId: record.fields['GoogleEventId'] || null // Ensure googleEventId is properly handled
     }));
   }
-
-  async function patchGoogleCalendarEvent(event) {
-    const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${event.googleEventId}`;
-    
-    const updatedEvent = {
-      summary: event.title,
-      description: event.description,
-      start: { dateTime: event.start.toISOString() },
-      end: { dateTime: event.end.toISOString() },
-      location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`, // Example of setting location based on address
-    };
-
-    await fetch(url, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': 'Bearer ' + session.provider_token,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(updatedEvent)
-    }).then(response => response.json())
-      .then(data => {
-        if (data.error) {
-          console.error('Error updating event:', data.error);
-        } else {
-          console.log('Event updated:', data);
-        }
-      });
-  }
+  
 
   function handleDateClick(date) {
     if (selectedDate && selectedDate.toDateString() === date.toDateString()) {
