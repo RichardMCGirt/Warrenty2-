@@ -9,53 +9,11 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function checkForDuplicateEvent(event, calendarId, session) {
-  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
-
-  const response = await fetch(url, {
-    headers: {
-      'Authorization': 'Bearer ' + session.provider_token
-    }
-  });
-
-  const data = await response.json();
-  if (data.error) {
-    console.error('Error fetching events:', data.error);
-    return false;
-  }
-
-  // Check if there's an event with the same summary, start, and end time
-  const isDuplicate = data.items.some(existingEvent => {
-    return existingEvent.summary === event.title &&
-           new Date(existingEvent.start.dateTime).getTime() === event.start.getTime() &&
-           new Date(existingEvent.end.dateTime).getTime() === event.end.getTime();
-  });
-
-  return isDuplicate;
-}
-
-async function deleteGoogleCalendarEvent(googleEventId, calendarId, session) {
-  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${googleEventId}`;
-  
-  await fetch(url, {
-    method: 'DELETE',
-    headers: {
-      'Authorization': 'Bearer ' + session.provider_token
-    }
-  }).then(response => {
-    if (response.ok) {
-      console.log(`Event with ID ${googleEventId} deleted from Google Calendar`);
-    } else {
-      console.error('Failed to delete event from Google Calendar:', response);
-    }
-  });
-}
-
 async function patchGoogleCalendarEvent(event, calendarId, session) {
   if (!event.googleEventId) {
     console.error('No googleEventId found for event:', event);
     const googleEventId = await createGoogleCalendarEvent(event, calendarId, session);
-    return; 
+    return;
   }
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${event.googleEventId}`;
@@ -82,8 +40,8 @@ async function patchGoogleCalendarEvent(event, calendarId, session) {
         console.error('Error updating event:', data.error);
         if (data.error.status === "PERMISSION_DENIED" && data.error.message.includes('Quota exceeded')) {
           console.log('Rate limit exceeded, retrying after delay...');
-          await delay(10000); 
-          return patchGoogleCalendarEvent(event, calendarId, session); 
+          await delay(10000);
+          return patchGoogleCalendarEvent(event, calendarId, session);
         }
       } else {
         console.log('Event updated:', data);
@@ -92,13 +50,6 @@ async function patchGoogleCalendarEvent(event, calendarId, session) {
 }
 
 async function createGoogleCalendarEvent(event, calendarId, session) {
-  const isDuplicate = await checkForDuplicateEvent(event, calendarId, session);
-  
-  if (isDuplicate) {
-    console.log('Duplicate event found, skipping creation.');
-    return null;
-  }
-
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
 
   const newEvent = {
@@ -200,37 +151,25 @@ function CalendarSection({ calendarId, calendarName, session }) {
         'Content-Type': 'application/json'
       }
     });
-  
+
     const data = await response.json();
     return data.records.map(record => ({
       id: record.id,
-      title: record.fields['Status'],
+      title: record.fields['Calendar Event Name'] || "Untitled Event", // Use 'Calendar Event Name' for the event title
       start: new Date(record.fields['startDate']),
       end: new Date(record.fields['endDate']),
-      description: record.fields['Billable Reason (If Billable)'],
-      branch: record.fields['b'],
-      homeownerName: record.fields['Homeowner Name'],
-      streetAddress: record.fields['Street Address'],
-      city: record.fields['City'],
-      state: record.fields['State'],
-      zipCode: record.fields['Zip Code'],
-      picturesOfIssue: record.fields['Picture(s) of Issue'],
-      calendarLink: record.fields['Calendar Link'],
-      vendorEmail: record.fields['Vendor Email'],
-      googleEventId: record.fields['GoogleEventId'] || null 
+      description: record.fields['Billable Reason (If Billable)'] || '',
+      branch: record.fields['b'] || 'Unknown',
+      homeownerName: record.fields['Homeowner Name'] || 'Unknown',
+      streetAddress: record.fields['Street Address'] || 'Unknown',
+      city: record.fields['City'] || 'Unknown',
+      state: record.fields['State'] || 'Unknown',
+      zipCode: record.fields['Zip Code'] || 'Unknown',
+      picturesOfIssue: record.fields['Picture(s) of Issue'] || '',
+      calendarLink: record.fields['Calendar Link'] || '',
+      vendorEmail: record.fields['Vendor Email'] || '',
+      googleEventId: record.fields['GoogleEventId'] || null,
     }));
-  }
-
-  
-    const data = await response.json();
-    const deletedRecords = data.records;
-    
-    deletedRecords.forEach(record => {
-      const googleEventId = record.fields['GoogleEventId'];
-      if (googleEventId) {
-        deleteGoogleCalendarEvent(googleEventId, calendarId, session);
-      }
-    });
   }
 
   function handleDateClick(date) {
@@ -259,16 +198,6 @@ function CalendarSection({ calendarId, calendarName, session }) {
     setShowInputs(true);
   }
 
-  async function handleDeleteEvent(eventId) {
-    const eventToDelete = events.find(event => event.id === eventId);
-    if (eventToDelete) {
-      await deleteGoogleCalendarEvent(eventToDelete.id, calendarId, session);
-      setEvents(events.filter(event => event.id !== eventId));
-      setSelectedEvents(selectedEvents.filter(event => event.id !== eventId));
-      alert("Event deleted!");
-    }
-  }
-
   async function saveEvent() {
     const event = {
       summary: eventName,
@@ -295,7 +224,7 @@ function CalendarSection({ calendarId, calendarName, session }) {
     }).then((data) => data.json())
       .then(() => {
         alert("Event saved!");
-        fetchEvents(); 
+        fetchEvents();
         resetForm();
       });
   }
@@ -335,7 +264,6 @@ function CalendarSection({ calendarId, calendarName, session }) {
                 <strong>{event.title}</strong><br />
                 {event.description && <em>{event.description}</em>}<br />
                 {event.start.toLocaleTimeString()} - {event.end.toLocaleTimeString()}
-                <button onClick={() => handleDeleteEvent(event.id)}>Delete</button>
               </li>
             ))}
           </ul>
