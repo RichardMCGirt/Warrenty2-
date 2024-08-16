@@ -12,7 +12,10 @@ function delay(ms) {
 async function patchGoogleCalendarEvent(event, calendarId, session) {
   if (!event.googleEventId) {
     console.error('No googleEventId found for event:', event);
-    return; // Exit early if googleEventId is undefined
+    // Optionally create a new event if googleEventId is not found
+    const googleEventId = await createGoogleCalendarEvent(event, calendarId, session);
+    // We no longer update Airtable with the new googleEventId
+    return; // Skip further processing if googleEventId was not found
   }
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${event.googleEventId}`;
@@ -48,6 +51,35 @@ async function patchGoogleCalendarEvent(event, calendarId, session) {
     });
 }
 
+async function createGoogleCalendarEvent(event, calendarId, session) {
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
+
+  const newEvent = {
+    summary: event.title,
+    description: event.description,
+    start: { dateTime: event.start.toISOString() },
+    end: { dateTime: event.end.toISOString() },
+    location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
+  };
+
+  return await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + session.provider_token,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(newEvent)
+  }).then(response => response.json())
+    .then(data => {
+      if (data.error) {
+        console.error('Error creating event:', data.error);
+        return null; // Return null if event creation failed
+      } else {
+        console.log('New event created:', data);
+        return data.id; // Return the new GoogleEventId
+      }
+    });
+}
 
 function CalendarSection({ calendarId, calendarName, session }) {
   const [start, setStart] = useState(new Date());
@@ -131,7 +163,7 @@ function CalendarSection({ calendarId, calendarName, session }) {
       start: new Date(record.fields['startDate']),
       end: new Date(record.fields['endDate']),
       description: record.fields['Billable Reason (If Billable)'],
-      branch: record.fields['Branch'],
+      branch: record.fields['b'],
       homeownerName: record.fields['Homeowner Name'],
       streetAddress: record.fields['Street Address'],
       city: record.fields['City'],
@@ -143,7 +175,6 @@ function CalendarSection({ calendarId, calendarName, session }) {
       googleEventId: record.fields['GoogleEventId'] || null // Ensure googleEventId is properly handled
     }));
   }
-  
 
   function handleDateClick(date) {
     if (selectedDate && selectedDate.toDateString() === date.toDateString()) {
