@@ -14,6 +14,7 @@ function CalendarSection({ calendarId, calendarName, session }) {
   const [selectedDate, setSelectedDate] = useState(null);
   const [selectedEvents, setSelectedEvents] = useState([]);
   const [editingEvent, setEditingEvent] = useState(null);
+  const [showInputs, setShowInputs] = useState(false);
 
   useEffect(() => {
     if (session) {
@@ -21,34 +22,66 @@ function CalendarSection({ calendarId, calendarName, session }) {
     }
   }, [session]);
 
-  async function fetchEvents() {
-    const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`, {
+  async function fetchEvents(pageToken = '') {
+    const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?${pageToken && `pageToken=${pageToken}`}`;
+    const response = await fetch(url, {
       headers: {
         'Authorization': 'Bearer ' + session.provider_token
       }
     });
 
     const data = await response.json();
-    const events = data.items.map(event => ({
-      id: event.id,
-      title: event.summary,
-      start: new Date(event.start.dateTime || event.start.date),
-      end: new Date(event.end.dateTime || event.end.date),
-      description: event.description || '',
-    }));
+    if (data.error) {
+      console.error('Error fetching events:', data.error);
+      return;
+    }
 
-    setEvents(events);
+    const fetchedEvents = data.items.map(event => {
+      // Check if the event has time specified; otherwise, set default time
+      const start = event.start.dateTime ? new Date(event.start.dateTime) : new Date(event.start.date);
+      const end = event.end.dateTime ? new Date(event.end.dateTime) : new Date(event.end.date);
+
+      if (!event.start.dateTime) {
+        start.setHours(8, 0, 0); // Set start time to 8 AM
+      }
+
+      if (!event.end.dateTime) {
+        end.setHours(20, 0, 0); // Set end time to 8 PM
+      }
+
+      return {
+        id: event.id,
+        title: event.summary,
+        start: start,
+        end: end,
+        description: event.description || '',
+      };
+    });
+
+    setEvents(prevEvents => [...prevEvents, ...fetchedEvents]);
+
+    // Handle pagination by checking if there's a nextPageToken
+    if (data.nextPageToken) {
+      fetchEvents(data.nextPageToken);
+    }
   }
 
   function handleDateClick(date) {
-    const dayEvents = events.filter(
-      event => event.start.toDateString() === date.toDateString()
-    );
-    setSelectedDate(date);
-    setStart(date);
-    setEnd(date);
-    setSelectedEvents(dayEvents || []);
-    setEditingEvent(null); // Reset editing state when selecting a new date
+    if (selectedDate && selectedDate.toDateString() === date.toDateString()) {
+      // If the same day is clicked, toggle the inputs
+      setShowInputs(!showInputs);
+      setSelectedDate(showInputs ? null : date);
+    } else {
+      const dayEvents = events.filter(
+        event => event.start.toDateString() === date.toDateString()
+      );
+      setSelectedDate(date);
+      setStart(date);
+      setEnd(date);
+      setSelectedEvents(dayEvents || []);
+      setEditingEvent(null);
+      setShowInputs(true); // Show inputs when a new date is clicked
+    }
   }
 
   function handleEventClick(event) {
@@ -57,6 +90,7 @@ function CalendarSection({ calendarId, calendarName, session }) {
     setEnd(event.end);
     setEventName(event.title);
     setEventDescription(event.description);
+    setShowInputs(true); // Ensure inputs are shown when an event is selected
   }
 
   async function saveEvent() {
@@ -97,6 +131,7 @@ function CalendarSection({ calendarId, calendarName, session }) {
     setStart(new Date());
     setEnd(new Date());
     setEditingEvent(null);
+    setShowInputs(false);
   }
 
   function tileContent({ date, view }) {
@@ -130,7 +165,7 @@ function CalendarSection({ calendarId, calendarName, session }) {
           </ul>
         </div>
       )}
-      {selectedDate && !editingEvent && (
+      {showInputs && (
         <>
           <p>Start of your event</p>
           <DateTimePicker onChange={setStart} value={start} />
@@ -161,8 +196,21 @@ function App() {
     { id: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com', name: 'Greensboro' },
     { id: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com', name: 'Myrtle Beach' },
     { id: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com', name: 'Wilmington' },
+    { id: 'https://calendar.google.com/calendar/embed?src=c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf%40group.calendar.google.com&ctz=America%2FToronto', name: 'Grenville'},
+    { id: 'https://calendar.google.com/calendar/embed?src=c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515%40group.calendar.google.com&ctz=America%2FToronto', name: 'Columbia'},
     { id: 'warranty@vanirinstalledsales.com', name: 'Warranty' }
   ];
+
+  const getGreeting = () => {
+    const currentHour = new Date().getHours();
+    if (currentHour < 12) {
+      return "Good morning";
+    } else if (currentHour < 18) {
+      return "Good afternoon";
+    } else {
+      return "Good evening";
+    }
+  };
 
   if (isLoading) {
     return <div>Loading...</div>;
@@ -175,7 +223,7 @@ function App() {
         <div style={{ width: "100%", margin: "0 auto" }}>
           {session ?
             <>
-              <h2>Hey there {session.user.email}</h2>
+              <h2>{getGreeting()} {session.user.email}</h2>
               <hr />
               <div className="calendar-grid">
                 {calendarInfo.map(calendar => (
