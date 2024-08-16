@@ -71,23 +71,26 @@ function CalendarSection({ calendarId, calendarName, session }) {
     }
   }
 
-  async function fetchAirtableEvents() {
-    const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tblFyuJwQTmSsXav7`;
-    const response = await fetch(url, {
-      headers: {
-        'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-        'Content-Type': 'application/json'
-      }
-    });
+  async function fetchAirtableEvents() { const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`; const response = await fetch(url, { headers: { 'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238', 'Content-Type': 'application/json' } });
+
 
     const data = await response.json();
     return data.records.map(record => ({
       id: record.id,
-      title: record.fields.Title,
-      start: new Date(record.fields.Start),
-      end: new Date(record.fields.End),
-      description: record.fields.Description,
-      googleEventId: record.fields.GoogleEventId // Assuming you store the Google Event ID in Airtable
+      title: record.fields['Status'],
+      start: new Date(record.fields['startDate']),
+      end: new Date(record.fields['endDate']),
+      description: record.fields['Billable Reason (If Billable)'],
+      branch: record.fields['Branch'],
+      homeownerName: record.fields['Homeowner Name'],
+      streetAddress: record.fields['Street Address'],
+      city: record.fields['City'],
+      state: record.fields['State'],
+      zipCode: record.fields['Zip Code'],
+      picturesOfIssue: record.fields['Picture(s) of Issue'],
+      calendarLink: record.fields['Calendar Link'],
+      vendorEmail: record.fields['Vendor Email'],
+      googleEventId: record.fields['GoogleEventId'] // Assuming this is in Airtable
     }));
   }
 
@@ -99,6 +102,7 @@ function CalendarSection({ calendarId, calendarName, session }) {
       description: event.description,
       start: { dateTime: event.start.toISOString() },
       end: { dateTime: event.end.toISOString() },
+      location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`, // Example of setting location based on address
     };
 
     await fetch(url, {
