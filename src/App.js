@@ -9,13 +9,53 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function checkForDuplicateEvent(event, calendarId, session) {
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
+
+  const response = await fetch(url, {
+    headers: {
+      'Authorization': 'Bearer ' + session.provider_token
+    }
+  });
+
+  const data = await response.json();
+  if (data.error) {
+    console.error('Error fetching events:', data.error);
+    return false;
+  }
+
+  // Check if there's an event with the same summary, start, and end time
+  const isDuplicate = data.items.some(existingEvent => {
+    return existingEvent.summary === event.title &&
+           new Date(existingEvent.start.dateTime).getTime() === event.start.getTime() &&
+           new Date(existingEvent.end.dateTime).getTime() === event.end.getTime();
+  });
+
+  return isDuplicate;
+}
+
+async function deleteGoogleCalendarEvent(googleEventId, calendarId, session) {
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${googleEventId}`;
+  
+  await fetch(url, {
+    method: 'DELETE',
+    headers: {
+      'Authorization': 'Bearer ' + session.provider_token
+    }
+  }).then(response => {
+    if (response.ok) {
+      console.log(`Event with ID ${googleEventId} deleted from Google Calendar`);
+    } else {
+      console.error('Failed to delete event from Google Calendar:', response);
+    }
+  });
+}
+
 async function patchGoogleCalendarEvent(event, calendarId, session) {
   if (!event.googleEventId) {
     console.error('No googleEventId found for event:', event);
-    // Optionally create a new event if googleEventId is not found
     const googleEventId = await createGoogleCalendarEvent(event, calendarId, session);
-    // We no longer update Airtable with the new googleEventId
-    return; // Skip further processing if googleEventId was not found
+    return; 
   }
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${event.googleEventId}`;
@@ -42,8 +82,8 @@ async function patchGoogleCalendarEvent(event, calendarId, session) {
         console.error('Error updating event:', data.error);
         if (data.error.status === "PERMISSION_DENIED" && data.error.message.includes('Quota exceeded')) {
           console.log('Rate limit exceeded, retrying after delay...');
-          await delay(10000); // Wait for 10 seconds
-          return patchGoogleCalendarEvent(event, calendarId, session); // Retry the request
+          await delay(10000); 
+          return patchGoogleCalendarEvent(event, calendarId, session); 
         }
       } else {
         console.log('Event updated:', data);
@@ -52,6 +92,13 @@ async function patchGoogleCalendarEvent(event, calendarId, session) {
 }
 
 async function createGoogleCalendarEvent(event, calendarId, session) {
+  const isDuplicate = await checkForDuplicateEvent(event, calendarId, session);
+  
+  if (isDuplicate) {
+    console.log('Duplicate event found, skipping creation.');
+    return null;
+  }
+
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
 
   const newEvent = {
@@ -73,10 +120,10 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
     .then(data => {
       if (data.error) {
         console.error('Error creating event:', data.error);
-        return null; // Return null if event creation failed
+        return null;
       } else {
         console.log('New event created:', data);
-        return data.id; // Return the new GoogleEventId
+        return data.id;
       }
     });
 }
@@ -118,16 +165,15 @@ function CalendarSection({ calendarId, calendarName, session }) {
     }
 
     const fetchedEvents = data.items.map(event => {
-      // Check if the event has time specified; otherwise, set default time
       const start = event.start.dateTime ? new Date(event.start.dateTime) : new Date(event.start.date);
       const end = event.end.dateTime ? new Date(event.end.dateTime) : new Date(event.end.date);
 
       if (!event.start.dateTime) {
-        start.setHours(8, 0, 0); // Set start time to 8 AM
+        start.setHours(8, 0, 0);
       }
 
       if (!event.end.dateTime) {
-        end.setHours(20, 0, 0); // Set end time to 8 PM
+        end.setHours(20, 0, 0);
       }
 
       return {
@@ -141,7 +187,6 @@ function CalendarSection({ calendarId, calendarName, session }) {
 
     setEvents(prevEvents => [...prevEvents, ...fetchedEvents]);
 
-    // Handle pagination by checking if there's a nextPageToken
     if (data.nextPageToken) {
       fetchEvents(data.nextPageToken);
     }
@@ -172,13 +217,24 @@ function CalendarSection({ calendarId, calendarName, session }) {
       picturesOfIssue: record.fields['Picture(s) of Issue'],
       calendarLink: record.fields['Calendar Link'],
       vendorEmail: record.fields['Vendor Email'],
-      googleEventId: record.fields['GoogleEventId'] || null // Ensure googleEventId is properly handled
+      googleEventId: record.fields['GoogleEventId'] || null 
     }));
+  }
+
+  
+    const data = await response.json();
+    const deletedRecords = data.records;
+    
+    deletedRecords.forEach(record => {
+      const googleEventId = record.fields['GoogleEventId'];
+      if (googleEventId) {
+        deleteGoogleCalendarEvent(googleEventId, calendarId, session);
+      }
+    });
   }
 
   function handleDateClick(date) {
     if (selectedDate && selectedDate.toDateString() === date.toDateString()) {
-      // If the same day is clicked, toggle the inputs
       setShowInputs(!showInputs);
       setSelectedDate(showInputs ? null : date);
     } else {
@@ -190,7 +246,7 @@ function CalendarSection({ calendarId, calendarName, session }) {
       setEnd(date);
       setSelectedEvents(dayEvents || []);
       setEditingEvent(null);
-      setShowInputs(true); // Show inputs when a new date is clicked
+      setShowInputs(true);
     }
   }
 
@@ -200,7 +256,17 @@ function CalendarSection({ calendarId, calendarName, session }) {
     setEnd(event.end);
     setEventName(event.title);
     setEventDescription(event.description);
-    setShowInputs(true); // Ensure inputs are shown when an event is selected
+    setShowInputs(true);
+  }
+
+  async function handleDeleteEvent(eventId) {
+    const eventToDelete = events.find(event => event.id === eventId);
+    if (eventToDelete) {
+      await deleteGoogleCalendarEvent(eventToDelete.id, calendarId, session);
+      setEvents(events.filter(event => event.id !== eventId));
+      setSelectedEvents(selectedEvents.filter(event => event.id !== eventId));
+      alert("Event deleted!");
+    }
   }
 
   async function saveEvent() {
@@ -215,7 +281,6 @@ function CalendarSection({ calendarId, calendarName, session }) {
     let method = "POST";
 
     if (editingEvent) {
-      // If editing an event, update it
       url += `/${editingEvent.id}`;
       method = "PUT";
     }
@@ -230,7 +295,7 @@ function CalendarSection({ calendarId, calendarName, session }) {
     }).then((data) => data.json())
       .then(() => {
         alert("Event saved!");
-        fetchEvents(); // Refresh events after saving
+        fetchEvents(); 
         resetForm();
       });
   }
@@ -270,6 +335,7 @@ function CalendarSection({ calendarId, calendarName, session }) {
                 <strong>{event.title}</strong><br />
                 {event.description && <em>{event.description}</em>}<br />
                 {event.start.toLocaleTimeString()} - {event.end.toLocaleTimeString()}
+                <button onClick={() => handleDeleteEvent(event.id)}>Delete</button>
               </li>
             ))}
           </ul>
