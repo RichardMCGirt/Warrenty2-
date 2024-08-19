@@ -153,7 +153,7 @@ async function fetchAirtableEvents() {
     .filter(record => record.fields['Calendar Event Name'] && record.fields['startDate'] && record.fields['endDate']) // Skip empty records
     .map(record => ({
       id: record.id,
-      title: record.fields['Calendar Event Name'] || "Untitled Event", // Use 'Calendar Event Name' for the event title
+      title: record.fields['Calendar Event Name'] || "Untitled Event",
       start: new Date(record.fields['startDate']),
       end: new Date(record.fields['endDate']),
       description: record.fields['Billable Reason (If Billable)'] || '',
@@ -214,7 +214,6 @@ async function fetchFutureGoogleEvents(calendarId, session) {
 
 async function populateAirtableWithGoogleEvents(googleEvents) {
   for (const event of googleEvents) {
-    // Check if a record with the same Street Address exists in Airtable
     const searchUrl = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula={Street Address}="${event.location}"`;
 
     const searchResponse = await fetch(searchUrl, {
@@ -227,7 +226,6 @@ async function populateAirtableWithGoogleEvents(googleEvents) {
     const searchData = await searchResponse.json();
 
     if (searchData.records && searchData.records.length > 0) {
-      // If a matching Street Address is found, update the record
       const recordId = searchData.records[0].id;
 
       const airtableRecord = {
@@ -237,7 +235,6 @@ async function populateAirtableWithGoogleEvents(googleEvents) {
           "GoogleEventId": event.googleEventId,
           "description": event.description,
           "location": event.location,
-          // Add or update any other relevant fields here
         }
       };
 
@@ -260,7 +257,50 @@ async function populateAirtableWithGoogleEvents(googleEvents) {
   }
 }
 
+async function populateGoogleCalendarWithAirtableRecords(calendarId, session) {
+  console.log('Populating Google Calendar with Airtable records...');
 
+  const airtableEvents = await fetchAirtableEvents();
+
+  for (const event of airtableEvents) {
+    if (event.googleEventId) {
+      console.log(`Skipping already synced event: ${event.title}`);
+      continue;
+    }
+
+    const newEvent = {
+      summary: event.title,
+      description: event.description,
+      start: { dateTime: event.start.toISOString() },
+      end: { dateTime: event.end.toISOString() },
+      location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
+    };
+
+    console.log('Creating new Google Calendar event:', newEvent);
+
+    await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + session.provider_token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(newEvent)
+    })
+    .then(response => response.json())
+    .then(async data => {
+      console.log('Google Calendar API response:', data);
+      if (data.error) {
+        console.error('Error creating event:', data.error);
+      } else {
+        console.log('New event successfully created in Google Calendar:', data);
+        await updateAirtableWithGoogleEventId(event.id, data.id);
+      }
+    })
+    .catch(error => console.error('Error during Google Calendar API call:', error));
+  }
+
+  console.log('Finished populating Google Calendar with Airtable records.');
+}
 
 function CalendarSection({ calendarId, calendarName, session, signOut }) {
   const [start, setStart] = useState(new Date());
@@ -282,19 +322,16 @@ function CalendarSection({ calendarId, calendarName, session, signOut }) {
         return;
       }
 
-      // Fetch future events from Google Calendar
       fetchFutureGoogleEvents(calendarId, session)
         .then(googleEvents => {
           console.log('Fetched Google Calendar future events:', googleEvents);
 
-          // Populate Airtable with these events
           populateAirtableWithGoogleEvents(googleEvents)
             .then(() => console.log('Finished populating Airtable with Google Events'))
             .catch(error => console.error('Error populating Airtable:', error));
         })
         .catch(error => console.error('Error fetching Google Calendar events:', error));
 
-      // Fetch and sync Airtable events with Google Calendar
       fetchAirtableEvents().then(airtableEvents => {
         console.log("Fetched Airtable events:", airtableEvents);
         airtableEvents.forEach(event => {
@@ -344,7 +381,7 @@ function CalendarSection({ calendarId, calendarName, session, signOut }) {
       end: { dateTime: end.toISOString() },
     };
   
-    let calendarId = 'primary'; // Use 'primary' if referring to the signed-in user's primary calendar
+    let calendarId = 'primary';
     let url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
     let method = "POST";
   
@@ -374,10 +411,9 @@ function CalendarSection({ calendarId, calendarName, session, signOut }) {
     })
     .then(() => {
       alert("Event saved!");
-      // Fetch future events to update the calendar display
       fetchFutureGoogleEvents(calendarId, session)
         .then(googleEvents => {
-          setEvents(googleEvents); // Update the state with the fetched events
+          setEvents(googleEvents);
         })
         .catch(error => console.error('Error fetching Google Calendar events:', error));
       resetForm();
@@ -487,7 +523,7 @@ function App() {
                     calendarId={calendar.id}
                     calendarName={calendar.name}
                     session={session}
-                    signOut={() => supabase.auth.signOut()}  // Pass the signOut function
+                    signOut={() => supabase.auth.signOut()}
                   />
                 ))}
               </div>
