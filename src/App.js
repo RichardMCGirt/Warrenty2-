@@ -10,8 +10,6 @@ function delay(ms) {
 }
 
 async function patchGoogleCalendarEvent(event, calendarId, session, signOut) {
-  console.log('Attempting to patch Google Calendar event:', event);
-
   if (!session.provider_token) {
     console.error('No valid session token available. Logging out.');
     signOut();
@@ -19,18 +17,14 @@ async function patchGoogleCalendarEvent(event, calendarId, session, signOut) {
   }
 
   if (!event.googleEventId) {
-    console.log('No googleEventId found for event. Creating a new event:', event);
     const googleEventId = await createGoogleCalendarEvent(event, calendarId, session, signOut);
     if (googleEventId) {
-      console.log('New Google Event ID created:', googleEventId);
       await updateAirtableWithGoogleEventId(event.id, googleEventId);
     }
     return;
   }
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${event.googleEventId}`;
-  console.log('Patching event at URL:', url);
-
   const updatedEvent = {
     summary: event.title,
     description: event.description,
@@ -38,8 +32,6 @@ async function patchGoogleCalendarEvent(event, calendarId, session, signOut) {
     end: { dateTime: event.end.toISOString() },
     location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
   };
-
-  console.log('Updated event data:', updatedEvent);
 
   await fetch(url, {
     method: 'PATCH',
@@ -50,23 +42,17 @@ async function patchGoogleCalendarEvent(event, calendarId, session, signOut) {
     body: JSON.stringify(updatedEvent)
   }).then(response => response.json())
     .then(async data => {
-      console.log('Google Calendar API response for patch:', data);
       if (data.error) {
         console.error('Error updating event:', data.error);
         if (data.error.status === "PERMISSION_DENIED" && data.error.message.includes('Quota exceeded')) {
-          console.log('Rate limit exceeded, retrying after delay...');
           await delay(10000);
           return patchGoogleCalendarEvent(event, calendarId, session, signOut);
         }
-      } else {
-        console.log('Event successfully updated:', data);
       }
     }).catch(error => console.error('Error during fetch request:', error));
 }
 
 async function createGoogleCalendarEvent(event, calendarId, session, signOut) {
-  console.log('Attempting to create a new Google Calendar event:', event);
-
   if (!session.provider_token) {
     console.error('No valid session token available. Logging out.');
     signOut();
@@ -74,7 +60,6 @@ async function createGoogleCalendarEvent(event, calendarId, session, signOut) {
   }
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
-
   const newEvent = {
     summary: event.title,
     description: event.description,
@@ -82,8 +67,6 @@ async function createGoogleCalendarEvent(event, calendarId, session, signOut) {
     end: { dateTime: event.end.toISOString() },
     location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
   };
-
-  console.log('New event data:', newEvent);
 
   return await fetch(url, {
     method: 'POST',
@@ -94,30 +77,20 @@ async function createGoogleCalendarEvent(event, calendarId, session, signOut) {
     body: JSON.stringify(newEvent)
   }).then(response => response.json())
     .then(data => {
-      console.log('Google Calendar creation response:', data);
       if (data.error) {
         console.error('Error creating event:', data.error);
         return null;
       } else {
-        console.log('New event successfully created:', data);
         return data.id;
       }
     }).catch(error => console.error('Error during fetch request:', error));
 }
 
 async function updateAirtableWithGoogleEventId(airtableRecordId, googleEventId) {
-  console.log('Updating Airtable with new Google Event ID:', googleEventId);
-
   const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${airtableRecordId}`;
-  const updateData = {
-    fields: {
-      GoogleEventId: googleEventId
-    }
-  };
+  const updateData = { fields: { GoogleEventId: googleEventId } };
 
-  console.log('Airtable update data:', updateData);
-
-  return await fetch(url, {
+  await fetch(url, {
     method: 'PATCH',
     headers: {
       'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
@@ -126,18 +99,13 @@ async function updateAirtableWithGoogleEventId(airtableRecordId, googleEventId) 
     body: JSON.stringify(updateData)
   }).then(response => response.json())
     .then(data => {
-      console.log('Airtable API response for update:', data);
       if (data.error) {
         console.error('Error updating Airtable with Google Event ID:', data.error);
-      } else {
-        console.log('Airtable record successfully updated:', data);
       }
     }).catch(error => console.error('Error during fetch request:', error));
 }
 
 async function fetchAirtableEvents() {
-  console.log('Fetching events from Airtable');
-
   const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`;
   const response = await fetch(url, {
     headers: {
@@ -147,10 +115,8 @@ async function fetchAirtableEvents() {
   });
 
   const data = await response.json();
-  console.log('Fetched data from Airtable:', data);
-
   return data.records
-    .filter(record => record.fields['Calendar Event Name'] && record.fields['startDate'] && record.fields['endDate']) // Skip empty records
+    .filter(record => record.fields['Calendar Event Name'] && record.fields['startDate'] && record.fields['endDate'])
     .map(record => ({
       id: record.id,
       title: record.fields['Calendar Event Name'] || "Untitled Event",
@@ -163,9 +129,6 @@ async function fetchAirtableEvents() {
       city: record.fields['City'] || 'Unknown',
       state: record.fields['State'] || 'Unknown',
       zipCode: record.fields['Zip Code'] || 'Unknown',
-      picturesOfIssue: record.fields['Picture(s) of Issue'] || '',
-      calendarLink: record.fields['Calendar Link'] || '',
-      vendorEmail: record.fields['Vendor Email'] || '',
       googleEventId: record.fields['GoogleEventId'] || null,
     }));
 }
@@ -173,16 +136,13 @@ async function fetchAirtableEvents() {
 async function fetchFutureGoogleEvents(calendarId, session) {
   const now = new Date().toISOString();
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${now}`;
-  console.log('Fetching future Google Calendar events:', url);
 
   let allEvents = [];
   let pageToken = '';
 
   do {
     const response = await fetch(`${url}&pageToken=${pageToken}`, {
-      headers: {
-        'Authorization': 'Bearer ' + session.provider_token
-      }
+      headers: { 'Authorization': 'Bearer ' + session.provider_token }
     });
 
     const data = await response.json();
@@ -213,20 +173,19 @@ async function fetchFutureGoogleEvents(calendarId, session) {
 }
 
 async function populateAirtableWithGoogleEvents(googleEvents) {
+  const now = new Date();
   for (const event of googleEvents) {
-    const searchUrl = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula={Street Address}="${event.location}"`;
+    if (event.start > now) { // Only future events
+      const searchUrl = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula={Street Address}="${event.location}"`;
 
-    const searchResponse = await fetch(searchUrl, {
-      headers: {
-        'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-        'Content-Type': 'application/json'
-      }
-    });
+      const searchResponse = await fetch(searchUrl, {
+        headers: {
+          'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+          'Content-Type': 'application/json'
+        }
+      });
 
-    const searchData = await searchResponse.json();
-
-    if (searchData.records && searchData.records.length > 0) {
-      const recordId = searchData.records[0].id;
+      const searchData = await searchResponse.json();
 
       const airtableRecord = {
         fields: {
@@ -234,33 +193,50 @@ async function populateAirtableWithGoogleEvents(googleEvents) {
           "endDate": event.end.toISOString(),
           "GoogleEventId": event.googleEventId,
           "description": event.description,
-          "location": event.location,
+          "Address": event.location,
         }
       };
 
-      const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${recordId}`;
+      if (searchData.records && searchData.records.length > 0) {
+        const recordId = searchData.records[0].id;
 
-      await fetch(url, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(airtableRecord)
-      }).then(response => response.json())
-        .then(data => {
-          console.log('Airtable record successfully updated:', data);
-        }).catch(error => console.error('Error during fetch request:', error));
-    } else {
-      console.log(`No matching record found for Street Address: ${event.location}. No action taken.`);
+        const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${recordId}`;
+
+        await fetch(url, {
+          method: 'PATCH',
+          headers: {
+            'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(airtableRecord)
+        }).then(response => response.json())
+          .then(data => {
+            console.log('Airtable record successfully updated:', data);
+          }).catch(error => console.error('Error during fetch request:', error));
+      } else {
+        // If no matching record is found, create a new one
+        const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`;
+
+        await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(airtableRecord)
+        }).then(response => response.json())
+          .then(data => {
+            console.log('New Airtable record successfully created:', data);
+          }).catch(error => console.error('Error during fetch request:', error));
+      }
     }
   }
 }
 
-async function populateGoogleCalendarWithAirtableRecords(calendarId, session) {
-  console.log('Populating Google Calendar with Airtable records...');
 
+async function populateGoogleCalendarWithAirtableRecords(calendarInfo, session) {
   const airtableEvents = await fetchAirtableEvents();
+  const now = new Date();
 
   for (const event of airtableEvents) {
     if (event.googleEventId) {
@@ -268,38 +244,39 @@ async function populateGoogleCalendarWithAirtableRecords(calendarId, session) {
       continue;
     }
 
-    const newEvent = {
-      summary: event.title,
-      description: event.description,
-      start: { dateTime: event.start.toISOString() },
-      end: { dateTime: event.end.toISOString() },
-      location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
-    };
+    if (event.start > now) { // Only future events
+      const calendar = calendarInfo.find(c => c.name === event.branch);
+      if (calendar) {
+        const newEvent = {
+          summary: event.title,
+          description: event.description,
+          start: { dateTime: event.start.toISOString() },
+          end: { dateTime: event.end.toISOString() },
+          location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
+        };
 
-    console.log('Creating new Google Calendar event:', newEvent);
-
-    await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + session.provider_token,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(newEvent)
-    })
-    .then(response => response.json())
-    .then(async data => {
-      console.log('Google Calendar API response:', data);
-      if (data.error) {
-        console.error('Error creating event:', data.error);
+        await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendar.id}/events`, {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + session.provider_token,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(newEvent)
+        })
+          .then(response => response.json())
+          .then(async data => {
+            if (!data.error) {
+              await updateAirtableWithGoogleEventId(event.id, data.id);
+            } else {
+              console.error('Error creating event:', data.error);
+            }
+          })
+          .catch(error => console.error('Error during Google Calendar API call:', error));
       } else {
-        console.log('New event successfully created in Google Calendar:', data);
-        await updateAirtableWithGoogleEventId(event.id, data.id);
+        console.log(`No calendar found for branch: ${event.branch}`);
       }
-    })
-    .catch(error => console.error('Error during Google Calendar API call:', error));
+    }
   }
-
-  console.log('Finished populating Google Calendar with Airtable records.');
 }
 
 function CalendarSection({ calendarId, calendarName, session, signOut }) {
@@ -314,44 +291,28 @@ function CalendarSection({ calendarId, calendarName, session, signOut }) {
   const [showInputs, setShowInputs] = useState(false);
 
   useEffect(() => {
-    console.log('Session state:', session);
     if (session) {
       if (!session.provider_token) {
-        console.error('No valid session token found. Logging out.');
         signOut();
         return;
       }
 
       fetchFutureGoogleEvents(calendarId, session)
-        .then(googleEvents => {
-          console.log('Fetched Google Calendar future events:', googleEvents);
-
-          populateAirtableWithGoogleEvents(googleEvents)
-            .then(() => console.log('Finished populating Airtable with Google Events'))
-            .catch(error => console.error('Error populating Airtable:', error));
-        })
-        .catch(error => console.error('Error fetching Google Calendar events:', error));
-
-      fetchAirtableEvents().then(airtableEvents => {
-        console.log("Fetched Airtable events:", airtableEvents);
-        airtableEvents.forEach(event => {
-          console.log("Processing event:", event);
-          patchGoogleCalendarEvent(event, calendarId, session, signOut);
-        });
-      }).catch(error => console.error("Error fetching Airtable events:", error));
+        .then(googleEvents => populateAirtableWithGoogleEvents(googleEvents))
+        .then(() => fetchAirtableEvents())
+        .then(airtableEvents => airtableEvents.forEach(event => patchGoogleCalendarEvent(event, calendarId, session, signOut)))
+        .then(() => fetchFutureGoogleEvents(calendarId, session))
+        .then(setEvents)
+        .catch(error => console.error("Error fetching events:", error));
     }
-  }, [session, signOut]);
+  }, [session, signOut, calendarId]);
 
   function handleDateClick(date) {
-    console.log('Date clicked:', date);
     if (selectedDate && selectedDate.toDateString() === date.toDateString()) {
       setShowInputs(!showInputs);
       setSelectedDate(showInputs ? null : date);
     } else {
-      const dayEvents = events.filter(
-        event => event.start.toDateString() === date.toDateString()
-      );
-      console.log('Events on selected date:', dayEvents);
+      const dayEvents = events.filter(event => event.start.toDateString() === date.toDateString());
       setSelectedDate(date);
       setStart(date);
       setEnd(date);
@@ -362,7 +323,6 @@ function CalendarSection({ calendarId, calendarName, session, signOut }) {
   }
 
   function handleEventClick(event) {
-    console.log('Event clicked:', event);
     setEditingEvent(event);
     setStart(event.start);
     setEnd(event.end);
@@ -372,57 +332,36 @@ function CalendarSection({ calendarId, calendarName, session, signOut }) {
   }
 
   async function saveEvent() {
-    console.log('Saving event:', { eventName, eventDescription, start, end });
-
     const event = {
       summary: eventName,
       description: eventDescription,
       start: { dateTime: start.toISOString() },
       end: { dateTime: end.toISOString() },
     };
-  
-    let calendarId = 'primary';
-    let url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
+
     let method = "POST";
-  
+    let url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
+
     if (editingEvent) {
-      url += `/${editingEvent.id}`;
+      url += `/${editingEvent.googleEventId}`;
       method = "PUT";
     }
 
-    console.log('Google Calendar event save URL:', url);
-    console.log('Method:', method);
-    console.log('Event data to save:', event);
-  
     await fetch(url, {
-      method: method,
+      method,
       headers: {
         'Authorization': 'Bearer ' + session.provider_token,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(event)
-    }).then((response) => {
-      console.log('Google Calendar save response:', response);
-      if (!response.ok) {
-        console.error(`Error saving event: ${response.statusText}`);
-        throw new Error(`Error saving event: ${response.statusText}`);
-      }
-      return response.json();
     })
-    .then(() => {
-      alert("Event saved!");
-      fetchFutureGoogleEvents(calendarId, session)
-        .then(googleEvents => {
-          setEvents(googleEvents);
-        })
-        .catch(error => console.error('Error fetching Google Calendar events:', error));
-      resetForm();
-    })
-    .catch(error => console.error('Error during saveEvent:', error));
+      .then(response => response.json())
+      .then(() => fetchFutureGoogleEvents(calendarId, session))
+      .then(setEvents)
+      .finally(resetForm);
   }
 
   function resetForm() {
-    console.log('Resetting form');
     setEventName("");
     setEventDescription("");
     setStart(new Date());
@@ -433,9 +372,7 @@ function CalendarSection({ calendarId, calendarName, session, signOut }) {
 
   function tileContent({ date, view }) {
     if (view === 'month') {
-      const dayEvents = events.filter(
-        event => event.start.toDateString() === date.toDateString()
-      );
+      const dayEvents = events.filter(event => event.start.toDateString() === date.toDateString());
       return dayEvents.length > 0 ? <div className="event-dot"></div> : null;
     }
   }
@@ -489,7 +426,13 @@ function App() {
   const { isLoading } = useSessionContext();
 
   const calendarInfo = [
-    { id: 'rmcgirt55@gmail.com', name: 'rmcgirt55@gmail.com' }
+    { id: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com', name: 'Charleston' },
+    { id: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com', name: 'Greensboro' },
+    { id: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com', name: 'Myrtle Beach' },
+    { id: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com', name: 'Wilmington' },
+    { id: 'https://calendar.google.com/calendar/embed?src=c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf%40group.calendar.google.com&ctz=America%2FToronto', name: 'Greenville' },
+    { id: 'https://calendar.google.com/calendar/embed?src=c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515%40group.calendar.google.com&ctz=America%2FToronto', name: 'Columbia' },
+    { id: 'warranty@vanirinstalledsales.com', name: 'Raleigh' }
   ];
 
   const getGreeting = () => {
@@ -503,6 +446,12 @@ function App() {
     }
   };
 
+  useEffect(() => {
+    if (session) {
+      populateGoogleCalendarWithAirtableRecords(calendarInfo, session);
+    }
+  }, [session]);
+
   if (isLoading) {
     return <div>Loading...</div>;
   }
@@ -512,7 +461,7 @@ function App() {
       <div className="container">
         <h1>Warranty Calendar</h1>
         <div style={{ width: "100%", margin: "0 auto" }}>
-          {session ?
+          {session ? (
             <>
               <h2>{getGreeting()} {session.user.email}</h2>
               <hr />
@@ -530,13 +479,11 @@ function App() {
               <p></p>
               <button onClick={() => supabase.auth.signOut()}>Sign Out</button>
             </>
-            :
-            <>
-              <button onClick={() => supabase.auth.signInWithOAuth({ provider: 'google', options: { scopes: 'https://www.googleapis.com/auth/calendar' } })}>
-                Sign In With Google
-              </button>
-            </>
-          }
+          ) : (
+            <button onClick={() => supabase.auth.signInWithOAuth({ provider: 'google', options: { scopes: 'https://www.googleapis.com/auth/calendar' } })}>
+              Sign In With Google
+            </button>
+          )}
         </div>
       </div>
     </div>
