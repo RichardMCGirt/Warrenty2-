@@ -170,6 +170,98 @@ async function fetchAirtableEvents() {
     }));
 }
 
+async function fetchFutureGoogleEvents(calendarId, session) {
+  const now = new Date().toISOString();
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${now}`;
+  console.log('Fetching future Google Calendar events:', url);
+
+  let allEvents = [];
+  let pageToken = '';
+
+  do {
+    const response = await fetch(`${url}&pageToken=${pageToken}`, {
+      headers: {
+        'Authorization': 'Bearer ' + session.provider_token
+      }
+    });
+
+    const data = await response.json();
+    if (data.error) {
+      console.error('Error fetching Google Calendar events:', data.error);
+      return [];
+    }
+
+    const events = data.items.map(event => {
+      const start = event.start?.dateTime ? new Date(event.start.dateTime) : event.start?.date ? new Date(event.start.date) : null;
+      const end = event.end?.dateTime ? new Date(event.end.dateTime) : event.end?.date ? new Date(event.end.date) : null;
+
+      return {
+        googleEventId: event.id,
+        title: event.summary || "Untitled Event",
+        start: start,
+        end: end,
+        description: event.description || '',
+        location: event.location || '',
+      };
+    });
+
+    allEvents = [...allEvents, ...events];
+    pageToken = data.nextPageToken || '';
+  } while (pageToken);
+
+  return allEvents;
+}
+
+async function populateAirtableWithGoogleEvents(googleEvents) {
+  for (const event of googleEvents) {
+    // Check if a record with the same Street Address exists in Airtable
+    const searchUrl = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula={Street Address}="${event.location}"`;
+
+    const searchResponse = await fetch(searchUrl, {
+      headers: {
+        'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const searchData = await searchResponse.json();
+
+    if (searchData.records && searchData.records.length > 0) {
+      // If a matching Street Address is found, update the record
+      const recordId = searchData.records[0].id;
+
+      const airtableRecord = {
+        fields: {
+          "startDate": event.start.toISOString(),
+          "endDate": event.end.toISOString(),
+          "GoogleEventId": event.googleEventId,
+          "description": event.description,
+          "location": event.location,
+          // Add or update any other relevant fields here
+        }
+      };
+
+      const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${recordId}`;
+
+      await fetch(url, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(airtableRecord)
+      }).then(response => response.json())
+        .then(data => {
+          console.log('Airtable record successfully updated:', data);
+        }).catch(error => console.error('Error during fetch request:', error));
+    } else {
+      console.log(`No matching record found for Street Address: ${event.location}. No action taken.`);
+    }
+  }
+}
+
+
+
 function CalendarSection({ calendarId, calendarName, session, signOut }) {
   const [start, setStart] = useState(new Date());
   const [end, setEnd] = useState(new Date());
@@ -189,8 +281,20 @@ function CalendarSection({ calendarId, calendarName, session, signOut }) {
         signOut();
         return;
       }
-      console.log('Fetching events from Google Calendar');
-      fetchEvents();
+
+      // Fetch future events from Google Calendar
+      fetchFutureGoogleEvents(calendarId, session)
+        .then(googleEvents => {
+          console.log('Fetched Google Calendar future events:', googleEvents);
+
+          // Populate Airtable with these events
+          populateAirtableWithGoogleEvents(googleEvents)
+            .then(() => console.log('Finished populating Airtable with Google Events'))
+            .catch(error => console.error('Error populating Airtable:', error));
+        })
+        .catch(error => console.error('Error fetching Google Calendar events:', error));
+
+      // Fetch and sync Airtable events with Google Calendar
       fetchAirtableEvents().then(airtableEvents => {
         console.log("Fetched Airtable events:", airtableEvents);
         airtableEvents.forEach(event => {
@@ -200,68 +304,6 @@ function CalendarSection({ calendarId, calendarName, session, signOut }) {
       }).catch(error => console.error("Error fetching Airtable events:", error));
     }
   }, [session, signOut]);
-
-  async function fetchEvents(pageToken = '') {
-    console.log('Fetching Google Calendar events with pageToken:', pageToken);
-
-    const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?${pageToken && `pageToken=${pageToken}`}`;
-    console.log('Google Calendar events fetch URL:', url);
-
-    const response = await fetch(url, {
-      headers: {
-        'Authorization': 'Bearer ' + session.provider_token
-      }
-    });
-
-    const data = await response.json();
-    console.log('Google Calendar events fetch response:', data);
-
-    if (data.error) {
-      console.error('Error fetching Google Calendar events:', data.error);
-      return;
-    }
-
-    const fetchedEvents = data.items.map(event => {
-      // Check if event.start and event.end exist
-      const start = event.start?.dateTime ? new Date(event.start.dateTime) : event.start?.date ? new Date(event.start.date) : null;
-      const end = event.end?.dateTime ? new Date(event.end.dateTime) : event.end?.date ? new Date(event.end.date) : null;
-
-      if (!start) {
-        console.error('Event start date is missing:', event);
-        return null; // Skip this event if start date is missing
-      }
-
-      if (!end) {
-        console.error('Event end date is missing:', event);
-        return null; // Skip this event if end date is missing
-      }
-
-      if (!event.start.dateTime) {
-        start.setHours(8, 0, 0);
-      }
-
-      if (!event.end.dateTime) {
-        end.setHours(20, 0, 0);
-      }
-
-      return {
-        id: event.id,
-        title: event.summary,
-        start: start,
-        end: end,
-        description: event.description || '',
-      };
-    }).filter(event => event !== null); // Filter out any events that were skipped due to missing dates
-
-    console.log('Fetched events from Google Calendar:', fetchedEvents);
-
-    setEvents(prevEvents => [...prevEvents, ...fetchedEvents]);
-
-    if (data.nextPageToken) {
-      fetchEvents(data.nextPageToken);
-    }
-}
-
 
   function handleDateClick(date) {
     console.log('Date clicked:', date);
@@ -332,12 +374,16 @@ function CalendarSection({ calendarId, calendarName, session, signOut }) {
     })
     .then(() => {
       alert("Event saved!");
-      fetchEvents();
+      // Fetch future events to update the calendar display
+      fetchFutureGoogleEvents(calendarId, session)
+        .then(googleEvents => {
+          setEvents(googleEvents); // Update the state with the fetched events
+        })
+        .catch(error => console.error('Error fetching Google Calendar events:', error));
       resetForm();
     })
     .catch(error => console.error('Error during saveEvent:', error));
   }
-  
 
   function resetForm() {
     console.log('Resetting form');
