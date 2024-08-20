@@ -26,9 +26,21 @@ async function createGoogleCalendarEvent(event, calendarId, session, signOut, se
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
 
+  const pictureUrlsDescription = event.pictureUrls.length > 0 
+    ? 'Pictures of Issue:\n' + event.pictureUrls.join('\n')
+    : 'No pictures provided.';
+
   const newEvent = {
     summary: event.title,
-    description: event.description,
+    description: `
+      ${event.description ? event.description + '\n' : ''}
+      Homeowner Name: ${event.homeownerName}
+      Lot Number: ${event.lotNumber}
+      Community/Neighborhood: ${event.community}
+      Contact Email: ${event.contactEmail}
+      Calendar Link: ${event.calendarLink ? event.calendarLink : 'Not Provided'}
+      ${pictureUrlsDescription}
+    `,
     start: { dateTime: event.start.toISOString() },
     end: { dateTime: event.end.toISOString() },
     location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
@@ -36,7 +48,6 @@ async function createGoogleCalendarEvent(event, calendarId, session, signOut, se
 
   console.log('New event data:', newEvent);
 
-  // Debounce the fetch request to prevent rapid duplicate requests
   return debounce(
     async () => {
       return await fetch(url, {
@@ -47,7 +58,6 @@ async function createGoogleCalendarEvent(event, calendarId, session, signOut, se
         },
         body: JSON.stringify(newEvent)
       }).then(response => {
-        // Capture rate limit info from headers
         const remaining = response.headers.get('X-RateLimit-Remaining');
         const limit = response.headers.get('X-RateLimit-Limit');
         const reset = response.headers.get('X-RateLimit-Reset');
@@ -72,6 +82,8 @@ async function createGoogleCalendarEvent(event, calendarId, session, signOut, se
     1000 // 1 second delay between API calls
   );
 }
+
+
 
 async function updateAirtableWithGoogleEventId(airtableRecordId, googleEventId) {
   console.log('Updating Airtable with new Google Event ID:', googleEventId);
@@ -119,7 +131,6 @@ async function fetchAirtableEvents(retryCount = 0) {
 
     if (!response.ok) {
       if (response.status === 429) {
-        // Handle rate limiting
         const retryAfter = response.headers.get('Retry-After');
         const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : Math.pow(2, retryCount) * 1000;
 
@@ -127,7 +138,7 @@ async function fetchAirtableEvents(retryCount = 0) {
 
         if (retryCount < maxRetries) {
           await new Promise(resolve => setTimeout(resolve, waitTime));
-          return fetchAirtableEvents(retryCount + 1); // Retry with incremented retry count
+          return fetchAirtableEvents(retryCount + 1);
         } else {
           throw new Error('Max retries exceeded');
         }
@@ -140,7 +151,7 @@ async function fetchAirtableEvents(retryCount = 0) {
     console.log('Fetched data from Airtable:', data);
 
     return data.records
-      .filter(record => record.fields['Calendar Event Name'] && record.fields['startDate'] && record.fields['endDate']) // Skip empty records
+      .filter(record => record.fields['Calendar Event Name'] && record.fields['startDate'] && record.fields['endDate'])
       .map(record => ({
         id: record.id,
         title: record.fields['Calendar Event Name'] || "Untitled Event",
@@ -149,6 +160,11 @@ async function fetchAirtableEvents(retryCount = 0) {
         description: record.fields['Billable Reason (If Billable)'] || '',
         branch: record.fields['b'] || 'Unknown',
         homeownerName: record.fields['Homeowner Name'] || 'Unknown',
+        lotNumber: record.fields['Lot Number'] || 'Unknown',
+        community: record.fields['Community/Neighborhood'] || 'Unknown',
+        contactEmail: record.fields['Contact Email'] || 'Unknown',
+        calendarLink: record.fields['Calendar Link'] || '',
+        pictureUrls: record.fields['Picture(s) of Issue']?.map(pic => pic.url) || [],
         streetAddress: record.fields['Street Address'] || 'Unknown',
         city: record.fields['City'] || 'Unknown',
         state: record.fields['State'] || 'Unknown',
@@ -163,10 +179,11 @@ async function fetchAirtableEvents(retryCount = 0) {
       console.log(`Retrying fetch attempt ${retryCount + 1} of ${maxRetries}...`);
       return fetchAirtableEvents(retryCount + 1);
     } else {
-      throw error; // Re-throw the error after max retries
+      throw error;
     }
   }
 }
+
 
 
 
