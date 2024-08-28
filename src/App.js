@@ -2,16 +2,16 @@ import React, { useState, useEffect } from 'react';
 import './App.css';
 import { useSession, useSupabaseClient, useSessionContext } from '@supabase/auth-helpers-react';
 
-// Helper to debounce API calls
-function debounce(fn, delay) {
-  let timeoutId;
-  return (...args) => {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-    timeoutId = setTimeout(() => {
-      fn(...args);
-    }, delay);
+// Debounce function to avoid rapid API calls
+function debounce(func, wait) {
+  let timeout;
+  return function executedFunction(...args) {
+    const later = () => {
+      clearTimeout(timeout);
+      func(...args);
+    };
+    clearTimeout(timeout);
+    timeout = setTimeout(later, wait);
   };
 }
 
@@ -48,42 +48,40 @@ async function createGoogleCalendarEvent(event, calendarId, session, signOut, se
 
   console.log('New event data:', newEvent);
 
-  return debounce(
-    async () => {
-      return await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + session.provider_token,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(newEvent)
-      }).then(response => {
-        const remaining = response.headers.get('X-RateLimit-Remaining');
-        const limit = response.headers.get('X-RateLimit-Limit');
-        const reset = response.headers.get('X-RateLimit-Reset');
-        setRateLimitInfo({ remaining, limit, reset });
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + session.provider_token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(newEvent)
+    });
 
-        return response.json();
-      }).then(data => {
-        console.log('Google Calendar creation response:', data);
-        if (data.error) {
-          console.error('Error creating event:', data.error);
-          if (data.error.code === 401) {
-            console.error('Unauthorized - Logging out');
-            signOut(); // Logout if unauthorized
-          }
-          return null;
-        } else {
-          console.log('New event successfully created:', data);
-          return data.id;
-        }
-      }).catch(error => console.error('Error during fetch request:', error));
-    },
-    1000 // 1 second delay between API calls
-  );
+    // Capture rate limit info from headers
+    const remaining = response.headers.get('X-RateLimit-Remaining');
+    const limit = response.headers.get('X-RateLimit-Limit');
+    const reset = response.headers.get('X-RateLimit-Reset');
+    setRateLimitInfo({ remaining, limit, reset });
+
+    const data = await response.json();
+    console.log('Google Calendar creation response:', data);
+    if (data.error) {
+      console.error('Error creating event:', data.error);
+      if (data.error.code === 401) {
+        console.error('Unauthorized - Logging out');
+        signOut(); // Logout if unauthorized
+      }
+      return null;
+    } else {
+      console.log('New event successfully created:', data);
+      return data.id;
+    }
+  } catch (error) {
+    console.error('Error during fetch request:', error);
+    return null;
+  }
 }
-
-
 
 async function updateAirtableWithGoogleEventId(airtableRecordId, googleEventId) {
   console.log('Updating Airtable with new Google Event ID:', googleEventId);
@@ -97,22 +95,26 @@ async function updateAirtableWithGoogleEventId(airtableRecordId, googleEventId) 
 
   console.log('Airtable update data:', updateData);
 
-  return await fetch(url, {
-    method: 'PATCH',
-    headers: {
-      'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(updateData)
-  }).then(response => response.json())
-    .then(data => {
-      console.log('Airtable API response for update:', data);
-      if (data.error) {
-        console.error('Error updating Airtable with Google Event ID:', data.error);
-      } else {
-        console.log('Airtable record successfully updated:', data);
-      }
-    }).catch(error => console.error('Error during fetch request:', error));
+  try {
+    const response = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(updateData)
+    });
+
+    const data = await response.json();
+    console.log('Airtable API response for update:', data);
+    if (data.error) {
+      console.error('Error updating Airtable with Google Event ID:', data.error);
+    } else {
+      console.log('Airtable record successfully updated:', data);
+    }
+  } catch (error) {
+    console.error('Error during fetch request:', error);
+  }
 }
 
 async function fetchAirtableEvents(retryCount = 0) {
@@ -184,10 +186,6 @@ async function fetchAirtableEvents(retryCount = 0) {
   }
 }
 
-
-
-
-
 async function checkForDuplicateEvent(event, calendarId, session) {
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${event.start.toISOString()}&timeMax=${event.end.toISOString()}`;
   
@@ -258,7 +256,6 @@ async function populateGoogleCalendarWithAirtableRecords(calendarId, calendarNam
   console.log(`Finished populating Google Calendar (${calendarName}) with Airtable records.`);
 }
 
-
 function CalendarSection({ calendarId, calendarName, session, signOut, setAddedRecords, setFailedRecords, setRateLimitInfo }) {
   const [lastSyncTime, setLastSyncTime] = useState(null);
 
@@ -269,8 +266,8 @@ function CalendarSection({ calendarId, calendarName, session, signOut, setAddedR
       const now = new Date();
 
       // Check if a sync has occurred in the last 15 minutes
-      if (lastSyncTime && (now - lastSyncTime) < 900000) {
-        console.log('Sync skipped. Last sync was less than 15 minutes ago.');
+      if (lastSyncTime && (now - lastSyncTime) < 450000) {
+        console.log('Sync skipped. Last sync was less than 6 minutes ago.');
         return;
       }
 
@@ -301,8 +298,8 @@ function CalendarSection({ calendarId, calendarName, session, signOut, setAddedR
     // Run syncEvents immediately when the component mounts
     syncEvents();
 
-    // Set up an interval to run syncEvents every 15 minutes (900000 ms)
-    const intervalId = setInterval(syncEvents, 900000);
+    // Set up an interval to run syncEvents every 6.6 minutes (900000 ms)
+    const intervalId = setInterval(syncEvents, 400000);
 
     // Clear the interval when the component unmounts
     return () => clearInterval(intervalId);
@@ -315,8 +312,6 @@ function CalendarSection({ calendarId, calendarName, session, signOut, setAddedR
   );
 }
 
-
-
 function App() {
   const session = useSession();
   const supabase = useSupabaseClient();
@@ -326,7 +321,6 @@ function App() {
   const [failedRecords, setFailedRecords] = useState([]);
   const [rateLimitInfo, setRateLimitInfo] = useState({ remaining: null, limit: null, reset: null });
 
-  // Sort calendar info alphabetically by name
   const calendarInfo = [
     { id: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com', name: 'Charleston' },
     { id: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com', name: 'Greensboro' },
@@ -345,6 +339,22 @@ function App() {
       return "Good afternoon";
     } else {
       return "Good evening";
+    }
+  };
+
+  const handleManualSync = async () => {
+    if (!session) return;
+    
+    for (const calendar of calendarInfo) {
+      await populateGoogleCalendarWithAirtableRecords(
+        calendar.id,
+        calendar.name,
+        session,
+        () => supabase.auth.signOut(),
+        setAddedRecords,
+        setFailedRecords,
+        setRateLimitInfo
+      );
     }
   };
 
@@ -416,6 +426,7 @@ function App() {
                   <p>No rate limit information available.</p>
                 )}
               </div>
+              <button onClick={handleManualSync}>Sync Data Now</button>
               <p></p>
               <button onClick={() => supabase.auth.signOut()}>Sign Out</button>
             </>
