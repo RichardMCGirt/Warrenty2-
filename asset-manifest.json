@@ -1,15 +1,15 @@
 {
   "files": {
-    "main.css": "/Warrenty2-/static/css/main.ebe1ecf7.css",
-    "main.js": "/Warrenty2-/static/js/main.dd94fa1f.js",
-    "static/js/787.c4e7f8f9.chunk.js": "/Warrenty2-/static/js/787.c4e7f8f9.chunk.js",
-    "index.html": "/Warrenty2-/index.html",
-    "main.ebe1ecf7.css.map": "/Warrenty2-/static/css/main.ebe1ecf7.css.map",
-    "main.dd94fa1f.js.map": "/Warrenty2-/static/js/main.dd94fa1f.js.map",
-    "787.c4e7f8f9.chunk.js.map": "/Warrenty2-/static/js/787.c4e7f8f9.chunk.js.map"
+    "main.css": "/warrentycalender.vanirinstalledsales.info/static/css/main.ebe1ecf7.css",
+    "main.js": "/warrentycalender.vanirinstalledsales.info/static/js/main.22e4b7ee.js",
+    "static/js/787.c4e7f8f9.chunk.js": "/warrentycalender.vanirinstalledsales.info/static/js/787.c4e7f8f9.chunk.js",
+    "index.html": "/warrentycalender.vanirinstalledsales.info/index.html",
+    "main.ebe1ecf7.css.map": "/warrentycalender.vanirinstalledsales.info/static/css/main.ebe1ecf7.css.map",
+    "main.22e4b7ee.js.map": "/warrentycalender.vanirinstalledsales.info/static/js/main.22e4b7ee.js.map",
+    "787.c4e7f8f9.chunk.js.map": "/warrentycalender.vanirinstalledsales.info/static/js/787.c4e7f8f9.chunk.js.map"
   },
   "entrypoints": [
     "static/css/main.ebe1ecf7.css",
-    "static/js/main.dd94fa1f.js"
+    "static/js/main.22e4b7ee.js"
   ]
 }
