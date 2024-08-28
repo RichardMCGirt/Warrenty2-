@@ -15,6 +15,57 @@ function debounce(func, wait) {
   };
 }
 
+// Fetch added records from Airtable
+async function fetchAddedRecordsFromAirtable() {
+  try {
+    const response = await fetch('https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ', {
+      headers: {
+        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238'
+      }
+    });
+
+    const data = await response.json();
+    return data.records
+      .filter(record => record.fields['Status'] === 'Added')
+      .map(record => record.fields['YourRecordFieldName']);
+  } catch (error) {
+    console.error('Error fetching added records from Airtable:', error);
+    return [];
+  }
+}
+
+// Fetch failed records from Airtable
+async function fetchFailedRecordsFromAirtable() {
+  try {
+    const response = await fetch('https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ', {
+      headers: {
+        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238'
+      }
+    });
+
+    const data = await response.json();
+    return data.records
+      .filter(record => record.fields['Status'] === 'Failed')
+      .map(record => record.fields['YourRecordFieldName']);
+  } catch (error) {
+    console.error('Error fetching failed records from Airtable:', error);
+    return [];
+  }
+}
+
+// Helper function to get a greeting based on the time of day
+function getGreeting() {
+  const currentHour = new Date().getHours();
+  if (currentHour < 12) {
+    return "Good morning";
+  } else if (currentHour < 18) {
+    return "Good afternoon";
+  } else {
+    return "Good evening";
+  }
+}
+
+// Function to create a Google Calendar event
 async function createGoogleCalendarEvent(event, calendarId, session, signOut, setRateLimitInfo) {
   console.log('Attempting to create a new Google Calendar event:', event);
 
@@ -83,6 +134,7 @@ async function createGoogleCalendarEvent(event, calendarId, session, signOut, se
   }
 }
 
+// Function to update Airtable with the Google Event ID
 async function updateAirtableWithGoogleEventId(airtableRecordId, googleEventId) {
   console.log('Updating Airtable with new Google Event ID:', googleEventId);
 
@@ -117,6 +169,7 @@ async function updateAirtableWithGoogleEventId(airtableRecordId, googleEventId) 
   }
 }
 
+// Fetch events from Airtable
 async function fetchAirtableEvents(retryCount = 0) {
   console.log('Fetching events from Airtable');
 
@@ -186,9 +239,10 @@ async function fetchAirtableEvents(retryCount = 0) {
   }
 }
 
+// Function to check for duplicate events in Google Calendar
 async function checkForDuplicateEvent(event, calendarId, session) {
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${event.start.toISOString()}&timeMax=${event.end.toISOString()}`;
-  
+
   const response = await fetch(url, {
     headers: {
       'Authorization': 'Bearer ' + session.provider_token,
@@ -196,7 +250,7 @@ async function checkForDuplicateEvent(event, calendarId, session) {
   });
 
   const data = await response.json();
-  
+
   if (data.items) {
     return data.items.some(existingEvent =>
       existingEvent.summary === event.title &&
@@ -207,10 +261,12 @@ async function checkForDuplicateEvent(event, calendarId, session) {
   return false;
 }
 
+// Function to introduce a delay
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Function to populate Google Calendar with records from Airtable
 async function populateGoogleCalendarWithAirtableRecords(calendarId, calendarName, session, signOut, setAddedRecords, setFailedRecords, setRateLimitInfo) {
   console.log(`Populating Google Calendar (${calendarName}) with Airtable records...`);
 
@@ -247,7 +303,7 @@ async function populateGoogleCalendarWithAirtableRecords(calendarId, calendarNam
     }
 
     // Introduce a delay of 1 second between requests
-    await sleep(600000);
+    await sleep(1000);
   }
 
   setAddedRecords(prev => [...prev, ...added]);
@@ -256,18 +312,27 @@ async function populateGoogleCalendarWithAirtableRecords(calendarId, calendarNam
   console.log(`Finished populating Google Calendar (${calendarName}) with Airtable records.`);
 }
 
+// Component to display each calendar section with countdown
 function CalendarSection({ calendarId, calendarName, session, signOut, setAddedRecords, setFailedRecords, setRateLimitInfo }) {
   const [lastSyncTime, setLastSyncTime] = useState(null);
+  const [timeUntilNextSync, setTimeUntilNextSync] = useState(0);
 
   useEffect(() => {
-    console.log('Session state:', session);
+    const calculateTimeUntilNextSync = () => {
+      const now = new Date();
+      if (lastSyncTime) {
+        const elapsed = now - lastSyncTime;
+        const remainingTime = 450000 - elapsed; // 450,000 ms = 7.5 minutes
+        setTimeUntilNextSync(Math.max(0, remainingTime));
+      }
+    };
 
     const syncEvents = () => {
       const now = new Date();
 
-      // Check if a sync has occurred in the last 15 minutes
+      // Calculate time since last sync
       if (lastSyncTime && (now - lastSyncTime) < 450000) {
-        console.log('Sync skipped. Last sync was less than 6 minutes ago.');
+        calculateTimeUntilNextSync();
         return;
       }
 
@@ -290,6 +355,7 @@ function CalendarSection({ calendarId, calendarName, session, signOut, setAddedR
           .then(() => {
             console.log(`Finished syncing Airtable events to Google Calendar (${calendarName})`);
             setLastSyncTime(new Date());  // Update last sync time
+            setTimeUntilNextSync(450000);  // Reset countdown
           })
           .catch(error => console.error(`Error syncing Airtable to Google Calendar (${calendarName}):`, error));
       }
@@ -298,20 +364,42 @@ function CalendarSection({ calendarId, calendarName, session, signOut, setAddedR
     // Run syncEvents immediately when the component mounts
     syncEvents();
 
-    // Set up an interval to run syncEvents every 6.6 minutes (900000 ms)
+    // Set up an interval to run syncEvents every 6.6 minutes (400000 ms)
     const intervalId = setInterval(syncEvents, 400000);
 
-    // Clear the interval when the component unmounts
-    return () => clearInterval(intervalId);
+    // Update countdown every second
+    const countdownInterval = setInterval(() => {
+      calculateTimeUntilNextSync();
+    }, 1000);
+
+    // Clear the intervals when the component unmounts
+    return () => {
+      clearInterval(intervalId);
+      clearInterval(countdownInterval);
+    };
   }, [session, signOut, calendarId, calendarName, setAddedRecords, setFailedRecords, setRateLimitInfo, lastSyncTime]);
+
+  // Convert milliseconds to mm:ss format
+  const formatTime = (ms) => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  };
 
   return (
     <div className="calendar-item">
       <h2>{calendarName}</h2>
+      {timeUntilNextSync > 0 ? (
+        <p>Next sync available in: {formatTime(timeUntilNextSync)}</p>
+      ) : (
+        <p>Ready to sync!</p>
+      )}
     </div>
   );
 }
 
+// Main App component
 function App() {
   const session = useSession();
   const supabase = useSupabaseClient();
@@ -320,6 +408,19 @@ function App() {
   const [addedRecords, setAddedRecords] = useState([]);
   const [failedRecords, setFailedRecords] = useState([]);
   const [rateLimitInfo, setRateLimitInfo] = useState({ remaining: null, limit: null, reset: null });
+
+  useEffect(() => {
+    // Fetch existing records from Airtable or another source if needed
+    async function fetchExistingRecords() {
+      const existingAddedRecords = await fetchAddedRecordsFromAirtable();
+      const existingFailedRecords = await fetchFailedRecordsFromAirtable();
+
+      setAddedRecords(existingAddedRecords);
+      setFailedRecords(existingFailedRecords);
+    }
+
+    fetchExistingRecords();
+  }, []);
 
   const calendarInfo = [
     { id: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com', name: 'Charleston' },
@@ -331,20 +432,9 @@ function App() {
     { id: 'warranty@vanirinstalledsales.com', name: 'Raleigh' }
   ].sort((a, b) => a.name.localeCompare(b.name));
 
-  const getGreeting = () => {
-    const currentHour = new Date().getHours();
-    if (currentHour < 12) {
-      return "Good morning";
-    } else if (currentHour < 18) {
-      return "Good afternoon";
-    } else {
-      return "Good evening";
-    }
-  };
-
   const handleManualSync = async () => {
     if (!session) return;
-    
+
     for (const calendar of calendarInfo) {
       await populateGoogleCalendarWithAirtableRecords(
         calendar.id,
