@@ -16,7 +16,7 @@ function debounce(fn, delay) {
 }
 
 async function createGoogleCalendarEvent(event, calendarId, session, signOut, setRateLimitInfo) {
-  console.log('Attempting to create a new Google Calendar event:', event);
+  console.log(`Attempting to create a new Google Calendar event for calendar: ${calendarId}`, event);
 
   if (!session.provider_token) {
     console.error('No valid session token available. Logging out.');
@@ -34,77 +34,79 @@ async function createGoogleCalendarEvent(event, calendarId, session, signOut, se
     location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
   };
 
-  console.log('New event data:', newEvent);
+  console.log('Event data being sent to Google Calendar API:', newEvent);
 
-  // Debounce the fetch request to prevent rapid duplicate requests
-  return debounce(
-    async () => {
-      return await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + session.provider_token,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(newEvent)
-      }).then(response => {
-        // Capture rate limit info from headers
-        const remaining = response.headers.get('X-RateLimit-Remaining');
-        const limit = response.headers.get('X-RateLimit-Limit');
-        const reset = response.headers.get('X-RateLimit-Reset');
-        setRateLimitInfo({ remaining, limit, reset });
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + session.provider_token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(newEvent),
+    });
 
-        return response.json();
-      }).then(data => {
-        console.log('Google Calendar creation response:', data);
-        if (data.error) {
-          console.error('Error creating event:', data.error);
-          if (data.error.code === 401) {
-            console.error('Unauthorized - Logging out');
-            signOut(); // Logout if unauthorized
-          }
-          return null;
-        } else {
-          console.log('New event successfully created:', data);
-          return data.id;
-        }
-      }).catch(error => console.error('Error during fetch request:', error));
-    },
-    1000 // 1 second delay between API calls
-  );
+    const data = await response.json();
+    console.log('Google Calendar API response:', data); // Detailed log for each response
+
+    // Capture rate limit info from headers
+    const remaining = response.headers.get('X-RateLimit-Remaining');
+    const limit = response.headers.get('X-RateLimit-Limit');
+    const reset = response.headers.get('X-RateLimit-Reset');
+    setRateLimitInfo({ remaining, limit, reset });
+
+    if (response.ok) {
+      console.log('Event successfully created in Google Calendar with ID:', data.id);
+      return data.id;
+    } else {
+      console.error('Failed to create event:', data);
+      if (data.error.code === 401) {
+        console.error('Unauthorized - Logging out');
+        signOut(); // Logout if unauthorized
+      }
+      return null;
+    }
+  } catch (error) {
+    console.error('Error during Google Calendar API request:', error);
+    return null;
+  }
 }
 
 async function updateAirtableWithGoogleEventId(airtableRecordId, googleEventId) {
-  console.log('Updating Airtable with new Google Event ID:', googleEventId);
+  console.log(`Updating Airtable record ${airtableRecordId} with Google Event ID: ${googleEventId}`);
 
   const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${airtableRecordId}`;
   const updateData = {
     fields: {
-      GoogleEventId: googleEventId
-    }
+      GoogleEventId: googleEventId,
+    },
   };
 
-  console.log('Airtable update data:', updateData);
+  try {
+    const response = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(updateData),
+    });
 
-  return await fetch(url, {
-    method: 'PATCH',
-    headers: {
-      'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(updateData)
-  }).then(response => response.json())
-    .then(data => {
-      console.log('Airtable API response for update:', data);
-      if (data.error) {
-        console.error('Error updating Airtable with Google Event ID:', data.error);
-      } else {
-        console.log('Airtable record successfully updated:', data);
-      }
-    }).catch(error => console.error('Error during fetch request:', error));
+    const data = await response.json();
+    console.log('Airtable update response:', data);
+
+    if (data.error) {
+      console.error('Error updating Airtable with Google Event ID:', data.error);
+    } else {
+      console.log('Airtable record successfully updated with Google Event ID:', data);
+    }
+  } catch (error) {
+    console.error('Error during Airtable API request:', error);
+  }
 }
 
 async function fetchAirtableEvents(retryCount = 0) {
-  console.log('Fetching events from Airtable');
+  console.log('Fetching events from Airtable...');
 
   const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`;
   const maxRetries = 1;
@@ -113,20 +115,19 @@ async function fetchAirtableEvents(retryCount = 0) {
     const response = await fetch(url, {
       headers: {
         'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-        'Content-Type': 'application/json'
-      }
+        'Content-Type': 'application/json',
+      },
     });
 
     if (!response.ok) {
       if (response.status === 429) {
-        // Handle rate limiting
         const retryAfter = response.headers.get('Retry-After');
         const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : Math.pow(2, retryCount) * 1000;
 
         console.warn(`Rate limit hit. Retrying after ${waitTime}ms...`);
 
         if (retryCount < maxRetries) {
-          await new Promise(resolve => setTimeout(resolve, waitTime));
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
           return fetchAirtableEvents(retryCount + 1); // Retry with incremented retry count
         } else {
           throw new Error('Max retries exceeded');
@@ -137,13 +138,29 @@ async function fetchAirtableEvents(retryCount = 0) {
     }
 
     const data = await response.json();
-    console.log('Fetched data from Airtable:', data);
+    console.log('Raw Airtable data fetched:', data);
 
-    return data.records
-      .filter(record => record.fields['Calendar Event Name'] && record.fields['startDate'] && record.fields['endDate']) // Skip empty records
-      .map(record => ({
+    const filteredRecords = data.records
+      .filter((record) => {
+        // Log any record that is filtered out
+        const hasEventName = !!record.fields['Calendar Event Name'];
+        const hasStartDate = !!record.fields['StartDate'];
+        const hasEndDate = !!record.fields['EndDate'];
+
+        if (!hasEventName || !hasStartDate || !hasEndDate) {
+          console.warn(`Record filtered out: ${record.id}`, {
+            eventName: record.fields['Calendar Event Name'],
+            startDate: record.fields['StartDate'],
+            endDate: record.fields['EndDate'],
+          });
+          return false;
+        }
+
+        return true;
+      })
+      .map((record) => ({
         id: record.id,
-        title: record.fields['Calendar Event Name'] || "Untitled Event",
+        title: record.fields['Calendar Event Name'] || 'Untitled Event',
         start: new Date(record.fields['StartDate']),
         end: new Date(record.fields['EndDate']),
         description: record.fields['Billable Reason (If Billable)'] || '',
@@ -155,6 +172,9 @@ async function fetchAirtableEvents(retryCount = 0) {
         zipCode: record.fields['Zip Code'] || 'Unknown',
         googleEventId: record.fields['GoogleEventId'] || null,
       }));
+
+    console.log(`Airtable events to process: ${filteredRecords.length}`, filteredRecords);
+    return filteredRecords;
 
   } catch (error) {
     console.error('Error fetching events from Airtable:', error);
@@ -169,44 +189,65 @@ async function fetchAirtableEvents(retryCount = 0) {
 }
 
 
-
-
 async function checkForDuplicateEvent(event, calendarId, session) {
+  console.log(`Checking for duplicate events in Google Calendar for event: ${event.title}`);
+
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${event.start.toISOString()}&timeMax=${event.end.toISOString()}`;
-  
-  const response = await fetch(url, {
-    headers: {
-      'Authorization': 'Bearer ' + session.provider_token,
-    },
-  });
 
-  const data = await response.json();
-  
-  if (data.items) {
-    return data.items.some(existingEvent =>
-      existingEvent.summary === event.title &&
-      existingEvent.location === `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`
-    );
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Authorization: 'Bearer ' + session.provider_token,
+      },
+    });
+
+    const data = await response.json();
+    if (data.items) {
+      const isDuplicate = data.items.some(
+        (existingEvent) =>
+          existingEvent.summary === event.title &&
+          existingEvent.location ===
+            `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`
+      );
+      console.log(
+        `Duplicate check for event "${event.title}": ${isDuplicate ? 'Found duplicate' : 'No duplicate'}`
+      );
+      return isDuplicate;
+    }
+  } catch (error) {
+    console.error('Error checking for duplicate events in Google Calendar:', error);
+    return false;
   }
-
-  return false;
 }
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function populateGoogleCalendarWithAirtableRecords(calendarId, calendarName, session, signOut, setAddedRecords, setFailedRecords, setRateLimitInfo) {
-  console.log(`Populating Google Calendar (${calendarName}) with Airtable records...`);
+async function populateGoogleCalendarWithAirtableRecords(
+  calendarId,
+  calendarName,
+  session,
+  signOut,
+  setAddedRecords,
+  setFailedRecords,
+  setRateLimitInfo
+) {
+  console.log(`Starting to populate Google Calendar "${calendarName}" with Airtable records...`);
 
   const airtableEvents = await fetchAirtableEvents();
+  console.log(`Processing ${airtableEvents.length} Airtable events for Google Calendar sync...`);
+  
   const added = [];
   const failed = [];
 
   for (const event of airtableEvents) {
-    // Skip events where the branch is "Unknown" or does not match the calendar name
+    console.log(`Processing event "${event.title}"...`);
+
     if (event.branch.toLowerCase() === 'unknown' || event.branch.toLowerCase() !== calendarName.toLowerCase()) {
-      console.log(`Skipping event "${event.title}" due to branch "${event.branch}" not matching "${calendarName}" or being "Unknown"`);
+      console.log(
+        `Skipping event "${event.title}" due to branch "${event.branch}" not matching "${calendarName}" or being "Unknown"`
+      );
       continue;
     }
 
@@ -222,74 +263,87 @@ async function populateGoogleCalendarWithAirtableRecords(calendarId, calendarNam
       continue;
     }
 
-    const googleEventId = await createGoogleCalendarEvent(event, calendarId, session, signOut, setRateLimitInfo);
+    const googleEventId = await createGoogleCalendarEvent(
+      event,
+      calendarId,
+      session,
+      signOut,
+      setRateLimitInfo
+    );
     if (googleEventId) {
       console.log('New Google Event ID created:', googleEventId);
       await updateAirtableWithGoogleEventId(event.id, googleEventId);
       added.push(event.title);
     } else {
+      console.log(`Failed to create Google Calendar event for "${event.title}".`);
       failed.push(event.title);
     }
 
-    // Introduce a delay of 1 second between requests
-    await sleep(600000);
+    await sleep(1000); // Adding delay between requests
   }
 
-  setAddedRecords(prev => [...prev, ...added]);
-  setFailedRecords(prev => [...prev, ...failed]);
+  setAddedRecords((prev) => [...prev, ...added]);
+  setFailedRecords((prev) => [...prev, ...failed]);
 
-  console.log(`Finished populating Google Calendar (${calendarName}) with Airtable records.`);
+  console.log(`Finished populating Google Calendar "${calendarName}" with Airtable records.`);
 }
 
-
-function CalendarSection({ calendarId, calendarName, session, signOut, setAddedRecords, setFailedRecords, setRateLimitInfo }) {
+function CalendarSection({
+  calendarId,
+  calendarName,
+  session,
+  signOut,
+  setAddedRecords,
+  setFailedRecords,
+  setRateLimitInfo,
+  triggerSync,
+  setTriggerSync
+}) {
   const [lastSyncTime, setLastSyncTime] = useState(null);
 
   useEffect(() => {
-    console.log('Session state:', session);
-
     const syncEvents = () => {
       const now = new Date();
+      console.log('Attempting to sync events...');
 
-      // Check if a sync has occurred in the last 15 minutes
-      if (lastSyncTime && (now - lastSyncTime) < 90000) {
+      if (lastSyncTime && now - lastSyncTime < 900000) {
         console.log('Sync skipped. Last sync was less than 15 minutes ago.');
         return;
       }
 
-      if (session) {
+      if (session && triggerSync) {
         if (!session.provider_token) {
           console.error('No valid session token found. Logging out.');
           signOut();
           return;
         }
 
+        console.log('Session valid. Initiating sync...');
         populateGoogleCalendarWithAirtableRecords(
-          calendarId, 
-          calendarName, 
-          session, 
-          signOut, 
-          setAddedRecords, 
-          setFailedRecords, 
+          calendarId,
+          calendarName,
+          session,
+          signOut,
+          setAddedRecords,
+          setFailedRecords,
           setRateLimitInfo
         )
           .then(() => {
-            console.log(`Finished syncing Airtable events to Google Calendar (${calendarName})`);
-            setLastSyncTime(new Date());  // Update last sync time
+            console.log(`Finished syncing events to Google Calendar "${calendarName}"`);
+            setLastSyncTime(new Date()); // Update last sync time
+            setTriggerSync(false); // Reset the triggerSync after sync
           })
-          .catch(error => console.error(`Error syncing Airtable to Google Calendar (${calendarName}):`, error));
+          .catch((error) =>
+            console.error(`Error syncing Airtable to Google Calendar "${calendarName}":`, error)
+          );
       }
     };
 
-    // Run syncEvents immediately when the component mounts
-    syncEvents();
-
-    // Set up an interval to run syncEvents every 15 minutes (900000 ms)
-    const intervalId = setInterval(syncEvents, 900000);
-
-    // Clear the interval when the component unmounts
-    return () => clearInterval(intervalId);
-  }, [session, signOut, calendarId, calendarName, setAddedRecords, setFailedRecords, setRateLimitInfo, lastSyncTime]);
+    if (triggerSync) {
+      console.log(`Manual sync triggered for calendar: ${calendarName}`);
+      syncEvents();
+    }
+  }, [session, signOut, calendarId, calendarName, setAddedRecords, setFailedRecords, setRateLimitInfo, lastSyncTime, triggerSync, setTriggerSync]);
 
   return (
     <div className="calendar-item">
@@ -297,8 +351,6 @@ function CalendarSection({ calendarId, calendarName, session, signOut, setAddedR
     </div>
   );
 }
-
-
 
 function App() {
   const session = useSession();
@@ -308,26 +360,25 @@ function App() {
   const [addedRecords, setAddedRecords] = useState([]);
   const [failedRecords, setFailedRecords] = useState([]);
   const [rateLimitInfo, setRateLimitInfo] = useState({ remaining: null, limit: null, reset: null });
+  const [triggerSync, setTriggerSync] = useState(false);
 
-  // Sort calendar info alphabetically by name
   const calendarInfo = [
-    { id: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com', name: 'Charleston' },
-    { id: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com', name: 'Greensboro' },
-    { id: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com', name: 'Myrtle Beach' },
-    { id: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com', name: 'Wilmington' },
-    { id: 'https://calendar.google.com/calendar/embed?src=c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf%40group.calendar.google.com&ctz=America%2FToronto', name: 'Grenville'},
-    { id: 'https://calendar.google.com/calendar/embed?src=c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515%40group.calendar.google.com&ctz=America%2FToronto', name: 'Columbia'},
     { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
   ].sort((a, b) => a.name.localeCompare(b.name));
+
+  const handleSyncNow = () => {
+    console.log('Manual sync button clicked.');
+    setTriggerSync(true); // Trigger manual sync
+  };
 
   const getGreeting = () => {
     const currentHour = new Date().getHours();
     if (currentHour < 12) {
-      return "Good morning";
+      return 'Good morning';
     } else if (currentHour < 18) {
-      return "Good afternoon";
+      return 'Good afternoon';
     } else {
-      return "Good evening";
+      return 'Good evening';
     }
   };
 
@@ -339,13 +390,14 @@ function App() {
     <div className="App">
       <div className="container">
         <h1>Warranty Calendar</h1>
-        <div style={{ width: "100%", margin: "0 auto" }}>
-          {session ?
+        <div style={{ width: '100%', margin: '0 auto' }}>
+          {session ? (
             <>
               <h2>{getGreeting()} {session.user.email}</h2>
               <hr />
+              <button onClick={handleSyncNow}>Sync Now</button> {/* Manual Sync Button */}
               <div className="calendar-grid">
-                {calendarInfo.map(calendar => (
+                {calendarInfo.map((calendar) => (
                   <CalendarSection
                     key={calendar.id}
                     calendarId={calendar.id}
@@ -355,6 +407,8 @@ function App() {
                     setAddedRecords={setAddedRecords}
                     setFailedRecords={setFailedRecords}
                     setRateLimitInfo={setRateLimitInfo}
+                    triggerSync={triggerSync}
+                    setTriggerSync={setTriggerSync}
                   />
                 ))}
               </div>
@@ -402,13 +456,13 @@ function App() {
               <p></p>
               <button onClick={() => supabase.auth.signOut()}>Sign Out</button>
             </>
-            :
+          ) : (
             <>
               <button onClick={() => supabase.auth.signInWithOAuth({ provider: 'google', options: { scopes: 'https://www.googleapis.com/auth/calendar' } })}>
                 Sign In With Google
               </button>
             </>
-          }
+          )}
         </div>
       </div>
     </div>
