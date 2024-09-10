@@ -317,12 +317,18 @@ async function populateGoogleCalendarWithAirtableRecords(
       continue;
     }
 
-    // Always try to update first
-    const existingGoogleEventId = await checkForDuplicateEvent(event, calendarId, session);
+    // Check if this event already exists in Airtable before creating a duplicate
+    const existingAirtableRecord = await checkIfAirtableRecordExists(event.title, event.start, event.end);
 
+    if (existingAirtableRecord) {
+      console.log(`Event "${event.title}" already exists in Airtable. Skipping creation.`);
+      failed.push(event.title);
+      continue;
+    }
+
+    const existingGoogleEventId = await checkForDuplicateEvent(event, calendarId, session);
     if (existingGoogleEventId) {
-      // Update the existing Google Calendar event
-      console.log(`Found existing event: "${event.title}". Updating...`);
+      console.log(`Duplicate event found: "${event.title}". Updating...`);
 
       const updatedGoogleEventId = await updateGoogleCalendarEvent(
         event,
@@ -335,14 +341,12 @@ async function populateGoogleCalendarWithAirtableRecords(
 
       if (updatedGoogleEventId) {
         await updateAirtableWithGoogleEventId(event.id, updatedGoogleEventId);
-        added.push({ title: event.title, status: 'Updated in Google Calendar' });
+        added.push(event.title);
       } else {
-        failed.push({ title: event.title, reason: 'Error during update' });
+        failed.push(event.title);
       }
-    } else {
-      // If no existing event, create a new one
-      console.log(`No existing event found for "${event.title}". Creating new...`);
 
+    } else {
       const googleEventId = await createGoogleCalendarEvent(
         event,
         calendarId,
@@ -353,9 +357,9 @@ async function populateGoogleCalendarWithAirtableRecords(
 
       if (googleEventId) {
         await updateAirtableWithGoogleEventId(event.id, googleEventId);
-        added.push({ title: event.title, status: 'Created in Google Calendar' });
+        added.push(event.title);
       } else {
-        failed.push({ title: event.title, reason: 'Error during creation' });
+        failed.push(event.title);
       }
     }
 
@@ -367,8 +371,6 @@ async function populateGoogleCalendarWithAirtableRecords(
 
   console.log(`Finished populating Google Calendar "${calendarName}" with Airtable records.`);
 }
-
-
 
 function CalendarSection({
   calendarId,
@@ -497,36 +499,30 @@ function App() {
               <div className="records-summary">
                 <h3>Records Summary</h3>
                 <div className="summary-container">
-                <div className="added-records">
-  <h4>Successfully Added Records:</h4>
-  {addedRecords.length > 0 ? (
-    <ul>
-      {addedRecords.map((record, index) => (
-        <li key={index}>
-          <strong>{record.title}:</strong> {record.status}
-        </li>
-      ))}
-    </ul>
-  ) : (
-    <p>No records added.</p>
-  )}
-</div>
-
+                  <div className="added-records">
+                    <h4>Successfully Added Records:</h4>
+                    {addedRecords.length > 0 ? (
+                      <ul>
+                        {addedRecords.map((record, index) => (
+                          <li key={index}>{record}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>No records added.</p>
+                    )}
+                  </div>
                   <div className="failed-records">
-  <h4>Failed to Add Records:</h4>
-  {failedRecords.length > 0 ? (
-    <ul>
-      {failedRecords.map((record, index) => (
-        <li key={index}>
-          <strong>{record.title}:</strong> {record.reason}
-        </li>
-      ))}
-    </ul>
-  ) : (
-    <p>No records failed.</p>
-  )}
-</div>
-
+                    <h4>Failed to Add Records:</h4>
+                    {failedRecords.length > 0 ? (
+                      <ul>
+                        {failedRecords.map((record, index) => (
+                          <li key={index}>{record}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>No records failed.</p>
+                    )}
+                  </div>
                 </div>
               </div>
               <div className="rate-limit-info">
