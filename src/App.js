@@ -2,18 +2,7 @@ import React, { useState, useEffect } from 'react';
 import './App.css';
 import { useSession, useSupabaseClient, useSessionContext } from '@supabase/auth-helpers-react';
 
-// Helper to debounce API calls
-function debounce(fn, delay) {
-  let timeoutId;
-  return (...args) => {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-    timeoutId = setTimeout(() => {
-      fn(...args);
-    }, delay);
-  };
-}
+
 
 async function createGoogleCalendarEvent(event, calendarId, session, signOut, setRateLimitInfo, setRateLimitHit) {
   console.log(`Attempting to create a new Google Calendar event for calendar: ${calendarId}`, event);
@@ -84,10 +73,11 @@ async function updateGoogleCalendarEvent(event, calendarId, eventId, session, si
     summary: event.title,
     description: `
       ${event.description}
+      \nlocation: ${event.location}
+
       \nHomeowner Name: ${event.homeownerName}
       \nMaterials Needed: ${event.materialsNeeded || 'Not specified'}
-      \nIssue Pictures: ${event.issuePictures}
-      \nCompleted Pictures: ${event.completedPictures}
+
     `,
     start: { dateTime: event.start.toISOString() },
     end: { dateTime: event.end.toISOString() },
@@ -167,7 +157,6 @@ async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, goo
   }
 }
 
-
 async function lockAirtableRecord(airtableRecordId) {
   const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${airtableRecordId}`;
   const updateData = {
@@ -217,10 +206,6 @@ async function unlockAirtableRecord(airtableRecordId) {
   }
 }
 
-
-
-
-
 async function updateAirtableWithProcessed(airtableRecordId) {
   console.log(`Marking Airtable record ${airtableRecordId} as processed`);
 
@@ -253,7 +238,6 @@ async function updateAirtableWithProcessed(airtableRecordId) {
     console.error('Error during Airtable API request:', error);
   }
 }
-
 
 async function fetchAirtableEvents(retryCount = 0) {
   console.log('Fetching unprocessed events from Airtable...');
@@ -307,8 +291,6 @@ async function fetchAirtableEvents(retryCount = 0) {
   }
 }
 
-
-
 async function checkForDuplicateEvent(event, calendarId, session) {
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${event.start.toISOString()}&timeMax=${event.end.toISOString()}`;
 
@@ -338,13 +320,9 @@ async function checkForDuplicateEvent(event, calendarId, session) {
   return null;
 }
 
-
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
-
 
 async function populateGoogleCalendarWithAirtableRecords(
   calendarId,
@@ -458,13 +436,6 @@ async function populateGoogleCalendarWithAirtableRecords(
   console.log(`Finished populating Google Calendar "${calendarName}" with Airtable records.`);
 }
 
-
-
-
-
-
-
-
 function CalendarSection({
   calendarId,
   calendarName,
@@ -536,7 +507,6 @@ function App() {
 
   const [addedRecords, setAddedRecords] = useState([]);
   const [failedRecords, setFailedRecords] = useState([]);
-  const [rateLimitInfo, setRateLimitInfo] = useState({ remaining: null, limit: null, reset: null });
   const [triggerSync, setTriggerSync] = useState(false);
   const [rateLimitHit, setRateLimitHit] = useState(false); // Move this here
 
@@ -584,7 +554,6 @@ function App() {
                   signOut={() => supabase.auth.signOut()}
                   setAddedRecords={setAddedRecords}
                   setFailedRecords={setFailedRecords}
-                  setRateLimitInfo={setRateLimitInfo}
                   triggerSync={triggerSync}
                   setTriggerSync={setTriggerSync}
                   rateLimitHit={rateLimitHit} // Pass rateLimitHit as prop
@@ -622,19 +591,7 @@ function App() {
                   </div>
                 </div>
               </div>
-              <div className="rate-limit-info">
-                <h4>Google Calendar API Rate Limit Information:</h4>
-                {rateLimitInfo.limit !== null ? (
-                  <ul>
-                    <li>Limit: {rateLimitInfo.limit}</li>
-                    <li>Remaining: {rateLimitInfo.remaining}</li>
-                    <li>Reset Time: {new Date(rateLimitInfo.reset * 1000).toLocaleTimeString()}</li>
-                  </ul>
-                ) : (
-                  <p>No rate limit information available.</p>
-                )}
-              </div>
-              <p></p>
+             
               <button onClick={() => supabase.auth.signOut()}>Sign Out</button>
             </>
           ) : (
