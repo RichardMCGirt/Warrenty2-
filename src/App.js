@@ -4,6 +4,7 @@ import { useSession, useSupabaseClient, useSessionContext } from '@supabase/auth
 
 
 
+
 async function createGoogleCalendarEvent(event, calendarId, session, signOut, setRateLimitInfo, setRateLimitHit) {
   console.log(`Attempting to create a new Google Calendar event for calendar: ${calendarId}`, event);
 
@@ -154,7 +155,6 @@ async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, goo
     console.log('Airtable update response:', data);
 
     if (!response.ok) {
-      console.error('Error updating Airtable with Google Event ID:', data.error);
       throw new Error(data.error);
     }
 
@@ -488,6 +488,49 @@ function CalendarSection({
   );
 }
 
+// Function to refresh the access token
+async function refreshAccessToken(refresh_token) {
+  const tokenURL = 'https://oauth2.googleapis.com/token';
+  const params = new URLSearchParams();
+
+  params.append('client_id', process.env.REACT_APP_GOOGLE_CLIENT_ID);
+  params.append('client_secret', process.env.REACT_APP_GOOGLE_CLIENT_SECRET);
+  params.append('refresh_token', refresh_token);
+  params.append('grant_type', 'refresh_token');
+
+  console.log('client_id:', process.env.REACT_APP_GOOGLE_CLIENT_ID);
+  console.log('client_secret:', process.env.REACT_APP_GOOGLE_CLIENT_SECRET);
+  console.log('refresh_token:', refresh_token);
+
+  try {
+    const response = await fetch(tokenURL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+
+    const data = await response.json();
+
+    if (response.ok) {
+      console.log('Access token refreshed:', data.access_token);
+      return data.access_token;
+    } else {
+      // Log detailed error information
+      console.error('Failed to refresh access token:');
+      console.error('Error Code:', data.error);  // The specific error code, e.g., 'invalid_grant'
+      console.error('Error Description:', data.error_description);  // Detailed description of the error
+      console.error('Full Error Response:', data);  // Log the full response object for any additional info
+      return null;
+    }
+  } catch (error) {
+    console.error('Error refreshing access token:', error);
+    return null;
+  }
+}
+
+
+
+
 function App() {
   const session = useSession();
   const supabase = useSupabaseClient();
@@ -496,16 +539,47 @@ function App() {
   const [addedRecords, setAddedRecords] = useState([]);
   const [failedRecords, setFailedRecords] = useState([]);
   const [triggerSync, setTriggerSync] = useState(false);
-  const [rateLimitHit, setRateLimitHit] = useState(false); // Move this here
+  const [rateLimitHit, setRateLimitHit] = useState(false);
 
   const calendarInfo = [
     { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
-  ].sort((a, b) => a.name.localeCompare(b.name));
+  ];
 
   const handleSyncNow = () => {
     console.log('Manual sync button clicked.');
     setTriggerSync(true); // Trigger manual sync
   };
+
+  // Check if access token is still valid
+  function isAccessTokenValid() {
+    const expirationTime = localStorage.getItem('expiration_time');
+    if (!expirationTime) {
+      return false;
+    }
+    return new Date().getTime() < expirationTime;
+  }
+
+  useEffect(() => {
+    if (session) {
+      const refreshTokenAsync = async () => {
+        const refresh_token = session.refresh_token;
+        const access_token = localStorage.getItem('access_token');
+
+        // Only refresh the token if it's expired
+        if (!isAccessTokenValid()) {
+          console.log('Access token expired, refreshing...');
+          const newAccessToken = await refreshAccessToken(refresh_token);
+          if (newAccessToken) {
+            await supabase.auth.setSession({ access_token: newAccessToken });
+          }
+        } else {
+          console.log('Access token is still valid, no need to refresh.');
+        }
+      };
+
+      refreshTokenAsync();
+    }
+  }, [session, supabase]);
 
   const getGreeting = () => {
     const currentHour = new Date().getHours();
@@ -535,19 +609,18 @@ function App() {
               <div className="calendar-grid">
                 {calendarInfo.map((calendar) => (
                   <CalendarSection
-                  key={calendar.id}
-                  calendarId={calendar.id}
-                  calendarName={calendar.name}
-                  session={session}
-                  signOut={() => supabase.auth.signOut()}
-                  setAddedRecords={setAddedRecords}
-                  setFailedRecords={setFailedRecords}
-                  triggerSync={triggerSync}
-                  setTriggerSync={setTriggerSync}
-                  rateLimitHit={rateLimitHit} // Pass rateLimitHit as prop
-                  setRateLimitHit={setRateLimitHit} // Pass setter as prop
-                />
-                
+                    key={calendar.id}
+                    calendarId={calendar.id}
+                    calendarName={calendar.name}
+                    session={session}
+                    signOut={() => supabase.auth.signOut()}
+                    setAddedRecords={setAddedRecords}
+                    setFailedRecords={setFailedRecords}
+                    triggerSync={triggerSync}
+                    setTriggerSync={setTriggerSync}
+                    rateLimitHit={rateLimitHit} // Pass rateLimitHit as prop
+                    setRateLimitHit={setRateLimitHit} // Pass setter as prop
+                  />
                 ))}
               </div>
               <div className="records-summary">
@@ -579,20 +652,20 @@ function App() {
                   </div>
                 </div>
               </div>
-             
               <button onClick={() => supabase.auth.signOut()}>Sign Out</button>
             </>
           ) : (
             <>
-             <button onClick={() => supabase.auth.signInWithOAuth({
-  provider: 'google',
-  options: {
-    scopes: 'https://www.googleapis.com/auth/calendar'
-  }
-})}>
-  Sign In With Google
-</button>
-
+              <button onClick={() => supabase.auth.signInWithOAuth({
+                provider: 'google',
+                options: {
+                  scopes: 'https://www.googleapis.com/auth/calendar',
+                  access_type: 'offline',  // Request offline access for refresh token
+                  prompt: 'consent'  // Force Google to show consent screen (ensures refresh token is issued)
+                }
+              })}>
+                Sign In With Google
+              </button>
             </>
           )}
         </div>
@@ -601,4 +674,4 @@ function App() {
   );
 }
 
-export default App; // Ensure default export
+export default App;
