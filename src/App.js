@@ -134,6 +134,7 @@ async function updateGoogleCalendarEvent(
 
 
 
+
 async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, googleEventId) {
   console.log(`Updating Airtable record ${airtableRecordId} with Google Event ID: ${googleEventId} and marking as processed`);
   
@@ -154,7 +155,7 @@ async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, goo
     const response = await fetch(url, {
       method: 'PATCH',
       headers: {
-        Authorization: 'Bearer YOUR_AIRTABLE_API_KEY',  // Replace with your actual API key
+        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',  // Replace with your actual API key
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(updateData),
@@ -318,7 +319,7 @@ async function checkForDuplicateEvent(event, calendarId, session) {
     });
 
     const data = await response.json();
-    
+
     if (data.items && data.items.length > 0) {
       const existingEvent = data.items.find(
         (existingEvent) =>
@@ -326,7 +327,18 @@ async function checkForDuplicateEvent(event, calendarId, session) {
           existingEvent.location === `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}` // Match location
       );
 
-      return existingEvent ? existingEvent.id : null; // Return the Google Event ID if a match is found
+      if (existingEvent) {
+        // Check for field differences
+        const fieldsToCheck = ['summary', 'description', 'start', 'end', 'location'];
+        const isDifferent = fieldsToCheck.some((field) => {
+          const eventField = field === 'start' || field === 'end' ? event[field].toISOString() : event[field];
+          const existingEventField = field === 'start' || field === 'end' ? existingEvent[field].dateTime : existingEvent[field];
+          return eventField !== existingEventField;
+        });
+
+        // If there's a difference, trigger an update
+        return isDifferent ? existingEvent.id : null;
+      }
     }
   } catch (error) {
     console.error('Error checking for duplicate events in Google Calendar:', error);
@@ -335,6 +347,7 @@ async function checkForDuplicateEvent(event, calendarId, session) {
 
   return null;
 }
+
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
