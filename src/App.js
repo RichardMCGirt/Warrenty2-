@@ -223,38 +223,7 @@ async function unlockAirtableRecord(airtableRecordId) {
   }
 }
 
-async function updateAirtableWithProcessed(airtableRecordId) {
-  console.log(`Marking Airtable record ${airtableRecordId} as processed`);
 
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${airtableRecordId}`;
-  const updateData = {
-    fields: {
-      Processed: true,  // Mark as processed
-    },
-  };
-
-  try {
-    const response = await fetch(url, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(updateData),
-    });
-
-    const data = await response.json();
-    console.log('Airtable update response:', data);
-
-    if (data.error) {
-      console.error('Error updating Airtable with processed status:', data.error);
-    } else {
-      console.log('Airtable record successfully marked as processed:', data);
-    }
-  } catch (error) {
-    console.error('Error during Airtable API request:', error);
-  }
-}
 
 async function fetchAirtableEvents(retryCount = 0) {
   console.log('Fetching unprocessed events from Airtable...');
@@ -466,7 +435,6 @@ function CalendarSection({
 
   useEffect(() => {
     const syncEvents = () => {
-      const now = new Date();
       console.log('Attempting to sync events...');
   
       if (session && triggerSync) {
