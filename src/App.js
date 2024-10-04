@@ -31,20 +31,20 @@ async function countAirtableRecords() {
   }
 }
 
-
-// Function to create a Google Calendar event with retry mechanism for rate limit errors
 async function createGoogleCalendarEvent(event, calendarId, session, setRateLimitHit, retryCount = 0) {
-  const MAX_RETRIES = 0; // Define a maximum number of retries
+  const MAX_RETRIES = 3; // Define a maximum number of retries
   const RETRY_DELAY = 2000 * Math.pow(2, retryCount); // Exponential backoff
 
   console.log(`Creating Google Calendar event for calendar: ${calendarId}`, event);
 
+  // Check if the event already exists in Google Calendar
   const existingGoogleEventId = await checkForDuplicateEvent(event, calendarId, session);
   if (existingGoogleEventId) {
-    console.log('Duplicate event found, skipping creation:', existingGoogleEventId);
-    return existingGoogleEventId;
+    console.log('Duplicate event found in Google Calendar, skipping creation:', existingGoogleEventId);
+    return existingGoogleEventId; // Skip creation and return the existing event ID
   }
 
+  // If no duplicates are found, proceed with event creation
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
   const updatedEvent = {
     summary: event.title,
@@ -190,29 +190,36 @@ async function unlockAirtableRecord(airtableRecordId) {
     console.error(`Failed to unlock record ${airtableRecordId}:`, error);
   }
 }
-
 async function fetchAirtableEvents(retryCount = 0) {
   console.log('Fetching unprocessed events from Airtable...');
-
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=OR(NOT({Processed}), {GoogleEventId} != BLANK())`;
+  
+  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=OR(NOT({Processed}), {GoogleEventId} != BLANK())&pageSize=100`; // Airtable page size limit is 100
+  let allRecords = [];
+  let offset = null;
 
   try {
-    const response = await fetch(url, {
-      headers: {
-        'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-        'Content-Type': 'application/json',
-      },
-    });
+    do {
+      const response = await fetch(`${url}${offset ? `&offset=${offset}` : ''}`, {
+        headers: {
+          'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+          'Content-Type': 'application/json',
+        },
+      });
 
-    if (!response.ok) {
-      console.error(`Error fetching events from Airtable: HTTP ${response.status}`);
-      return [];
-    }
+      if (!response.ok) {
+        console.error(`Error fetching events from Airtable: HTTP ${response.status}`);
+        return [];
+      }
 
-    const data = await response.json();
-    console.log('Raw Airtable data fetched:', data);
+      const data = await response.json();
+      offset = data.offset || null; // If there's an offset, continue fetching the next page
+      allRecords = [...allRecords, ...data.records]; // Append new records to the allRecords array
 
-    const filteredRecords = data.records
+      console.log(`Fetched ${data.records.length} records, total so far: ${allRecords.length}`);
+
+    } while (offset && allRecords.length > 100); // Stop looping if total records are 100 or fewer
+
+    const filteredRecords = allRecords
       .filter((record) => {
         // Ensure event has a name, start and end dates
         return record.fields['Calendar Event Name'] && record.fields['StartDate'] && record.fields['EndDate'];
@@ -276,10 +283,10 @@ async function checkForDuplicateEvent(event, calendarId, session) {
   return null;
 }
 
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
 async function populateGoogleCalendarWithAirtableRecords(
   calendarId,
   calendarName,
@@ -296,17 +303,13 @@ async function populateGoogleCalendarWithAirtableRecords(
 
   const airtableEvents = await fetchAirtableEvents();
   const totalFetchedRecords = airtableEvents.length;
+
   let createdEventsCount = 0;
   const added = [];
   const failed = [];
   const changed = [];
   const noChange = [];
   const processedRecordIds = new Set();
-
-  if (totalFetchedRecords === 0) {
-    console.log('No records fetched from Airtable.');
-    return;
-  }
 
   for (const event of airtableEvents) {
     if (processedRecordIds.has(event.id)) {
@@ -413,6 +416,8 @@ async function populateGoogleCalendarWithAirtableRecords(
   console.log(`Total number of records processed: ${processedRecordIds.size}`);
   console.log('Finished populating Google Calendar with Airtable records.');
 }
+
+
 
 
 
@@ -635,7 +640,6 @@ async function uncheckAllProcessedRecords() {
 }
 const FIFTEEN_MINUTES = 15 * 60 * 1000;  // 15 minutes in milliseconds
 
-
 function App() {
   const session = useSession();
   const supabase = useSupabaseClient();
@@ -654,76 +658,88 @@ function App() {
     { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
   ].sort((a, b) => a.name.localeCompare(b.name));
 
-  // Automatically login on startup
-  useEffect(() => {
-    if (!session) {
-      console.log('No session detected. Attempting automatic login...');
-      supabase.auth.signInWithOAuth({
+  // Login handler
+  const handleLogin = async () => {
+    try {
+      console.log('Logging in user...');
+      await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
           scopes: 'https://www.googleapis.com/auth/calendar',
           redirectTo: window.location.origin, // Redirect back to your app after login
         }
       });
+    } catch (loginError) {
+      console.error('Error during login:', loginError);
     }
-  }, [session, supabase]);
+  };
 
+  // Automatically log out user if no authorization or token times out
+  const handleAuthorizationFailure = () => {
+    console.error('Authorization failed or session timed out. Logging out...');
+    supabase.auth.signOut(); // Log out the user
+  };
 
- // Helper function to format time
- const formatTime = (time) => {
-  const minutes = Math.floor(time / 60000);
-  const seconds = Math.floor((time % 60000) / 1000);
-  return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`; // Ensure seconds are always two digits
-};
-    // Countdown logic...
-    useEffect(() => {
-      if (timeLeft > 0) {
-        const countdownInterval = setInterval(() => {
-          setTimeLeft((prevTime) => prevTime - 1000);  // Decrease countdown by 1 second
-          const progress = (FIFTEEN_MINUTES - timeLeft) / FIFTEEN_MINUTES * 100;
-          setPercentage(progress);
-        }, 1000);
-  
-        return () => clearInterval(countdownInterval);  // Clear interval on unmount
-      } else {
-        setTriggerSync(true); // Trigger sync when countdown reaches 0
-        setTimeLeft(FIFTEEN_MINUTES); // Reset countdown after sync
-      }
-    }, [timeLeft]);
+  // Automatically login on startup
+  useEffect(() => {
+    if (!session) {
+      console.log('No session detected.');
+    }
+  }, [session]);
+
+  // Helper function to format time
+  const formatTime = (time) => {
+    const minutes = Math.floor(time / 60000);
+    const seconds = Math.floor((time % 60000) / 1000);
+    return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`; // Ensure seconds are always two digits
+  };
+
+  // Countdown logic
+  useEffect(() => {
+    if (timeLeft > 0) {
+      const countdownInterval = setInterval(() => {
+        setTimeLeft((prevTime) => prevTime - 1000);  // Decrease countdown by 1 second
+        const progress = (FIFTEEN_MINUTES - timeLeft) / FIFTEEN_MINUTES * 100;
+        setPercentage(progress);
+      }, 1000);
+
+      return () => clearInterval(countdownInterval);  // Clear interval on unmount
+    } else {
+      setTriggerSync(true); // Trigger sync when countdown reaches 0
+      setTimeLeft(FIFTEEN_MINUTES); // Reset countdown after sync
+    }
+  }, [timeLeft]);
 
   const handleSyncNow = () => {
     console.log('Manual sync button clicked.');
     setTriggerSync(true); 
   };
 
-/// Greeting function with formatted name
-const getGreeting = () => {
-  // Ensure session exists and session.user is available
-  if (!session || !session.user) {
-    return 'Hello, Guest'; // Provide a fallback for users who are not logged in
-  }
+  // Greeting function with formatted name
+  const getGreeting = () => {
+    // Ensure session exists and session.user is available
+    if (!session || !session.user) {
+      return 'Hello, Guest'; // Provide a fallback for users who are not logged in
+    }
 
-  const currentHour = new Date().getHours();
-  let name = session.user.email.split('@')[0];  // Get the part of the email before '@'
-  name = name.replace(/\./g, ' ');  // Replace periods with spaces
+    const currentHour = new Date().getHours();
+    let name = session.user.email.split('@')[0];  // Get the part of the email before '@'
+    name = name.replace(/\./g, ' ');  // Replace periods with spaces
 
-  // Capitalize first and last names
-  name = name
-    .split(' ')  // Split the name into words
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))  // Capitalize first letter of each word
-    .join(' ');  // Join the words back into a string
+    // Capitalize first and last names
+    name = name
+      .split(' ')  // Split the name into words
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))  // Capitalize first letter of each word
+      .join(' ');  // Join the words back into a string
 
-  if (currentHour < 12) {
-    return `Good morning, ${name}`;
-  } else if (currentHour < 18) {
-    return `Good afternoon, ${name}`;
-  } else {
-    return `Good evening, ${name}`;
-  }
-};
-
-
-  
+    if (currentHour < 12) {
+      return `Good morning, ${name}`;
+    } else if (currentHour < 18) {
+      return `Good afternoon, ${name}`;
+    } else {
+      return `Good evening, ${name}`;
+    }
+  };
 
   if (isLoading) {
     return <div>Loading...</div>;
@@ -740,7 +756,6 @@ const getGreeting = () => {
         {/* Show the timer and sync only if user is logged in */}
         {session && (
           <div className="progress-section" style={{ textAlign: 'center' }}>
-            
             <div style={{ width: '80px', height: '80px', margin: '0 auto' }}>
               <CircularProgressbar
                 value={percentage}
@@ -763,31 +778,28 @@ const getGreeting = () => {
         <div style={{ width: '100%', margin: '0 auto' }}>
           {session ? (
             <>
-            <hr />
+              <hr />
               <button onClick={handleSyncNow}>Sync Now</button> 
               <div className="calendar-grid">
-  {calendarInfo.map((calendar) => (
-    <CalendarSection
-      key={calendar.id}
-      calendarId={calendar.id}
-      calendarName={calendar.name}
-      session={session}
-      signOut={() => supabase.auth.signOut()}
-      setAddedRecords={setAddedRecords}
-      setFailedRecords={setFailedRecords}
-      triggerSync={triggerSync}
-      setTriggerSync={setTriggerSync}
-      rateLimitHit={rateLimitHit}
-      setRateLimitHit={setRateLimitHit}        
-      setNoChangeRecords={setNoChangeRecords}
-      setChangedRecords={setChangedRecords}
-      handleSyncNow={handleSyncNow}  
-    />
-  ))}
-</div>
-
-    {/* Progress Bar */}
-  
+                {calendarInfo.map((calendar) => (
+                  <CalendarSection
+                    key={calendar.id}
+                    calendarId={calendar.id}
+                    calendarName={calendar.name}
+                    session={session}
+                    signOut={() => supabase.auth.signOut()}
+                    setAddedRecords={setAddedRecords}
+                    setFailedRecords={setFailedRecords}
+                    triggerSync={triggerSync}
+                    setTriggerSync={setTriggerSync}
+                    rateLimitHit={rateLimitHit}
+                    setRateLimitHit={setRateLimitHit}        
+                    setNoChangeRecords={setNoChangeRecords}
+                    setChangedRecords={setChangedRecords}
+                    handleSyncNow={handleSyncNow}  
+                  />
+                ))}
+              </div>
 
               <div className="records-summary">
                 <h3>Records Summary</h3>
@@ -850,14 +862,7 @@ const getGreeting = () => {
             </>
           ) : (
             <>
-              <button onClick={() => supabase.auth.signInWithOAuth({
-                provider: 'google',
-                options: {
-                  scopes: 'https://www.googleapis.com/auth/calendar'
-                }
-              })}>
-                Sign In With Google
-              </button>
+              <button onClick={handleLogin}>Sign In With Google</button>
             </>
           )}
         </div>
