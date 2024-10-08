@@ -3,6 +3,67 @@ import './App.css';
 import { useSession, useSupabaseClient, useSessionContext } from '@supabase/auth-helpers-react';
 import { CircularProgressbar } from 'react-circular-progressbar'; // Make sure this package is installed
 
+async function uncheckProcessedForMissingGoogleEventId() {
+  console.log("Checking for records missing GoogleEventId but marked as processed...");
+
+  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=AND({Processed}, NOT({GoogleEventId}))&pageSize=100`;
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    const recordsToUpdate = data.records.map((record) => ({
+      id: record.id,
+      fields: { Processed: false }, // Uncheck Processed
+    }));
+
+    if (recordsToUpdate.length === 0) {
+      console.log('No records found where Processed is checked but GoogleEventId is missing.');
+      return;
+    }
+
+    console.log(`Found ${recordsToUpdate.length} records to uncheck Processed.`);
+
+    // Batch update to uncheck Processed for those records
+    const batchUrl = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`;
+    const batchSize = 10; // Airtable recommends batch size of 10
+
+    for (let i = 0; i < recordsToUpdate.length; i += batchSize) {
+      const batch = recordsToUpdate.slice(i, i + batchSize);
+
+      try {
+        const response = await fetch(batchUrl, {
+          method: 'PATCH',
+          headers: {
+            Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ records: batch }),
+        });
+
+        const result = await response.json();
+        if (!response.ok) {
+          console.error('Error unchecking Processed:', result.error);
+        } else {
+          console.log('Successfully unchecked Processed for batch:', result);
+        }
+      } catch (error) {
+        console.error('Error during batch update to uncheck Processed:', error);
+      }
+    }
+
+  } catch (error) {
+    console.error('Error fetching records for unchecking Processed:', error);
+  }
+}
+
+
 async function createGoogleCalendarEvent(event, calendarId, session) {
   // First, check for duplicates
   const existingGoogleEventId = await checkForDuplicateEvent(event, calendarId, session);
@@ -312,8 +373,8 @@ async function populateGoogleCalendarWithAirtableRecords(
     console.log('No unprocessed events to sync.');
     setAllRecordsProcessed(true);
 
-       // Check if any records have changed between Airtable and Google Calendar
-       await checkAndSyncDifferences(calendarId, session, airtableEvents);
+    // Check if any records have changed between Airtable and Google Calendar
+    await checkAndSyncDifferences(calendarId, session, airtableEvents);
     return;
   }
 
@@ -386,9 +447,13 @@ async function populateGoogleCalendarWithAirtableRecords(
   console.log(`Total number of records processed: ${processedRecordIds.size}`);
   console.log('Finished populating Google Calendar with Airtable records.');
 
+  // Check for differences
   await checkAndSyncDifferences(calendarId, session, airtableEvents);
 
+  // Remove GoogleEventId for any unprocessed records
+  await removeGoogleEventIdForUnprocessedRecords();
 }
+
 
 async function checkAndSyncDifferences(calendarId, session, airtableEvents) {
   console.log('Checking for differences between Airtable and Google Calendar events...');
@@ -449,6 +514,67 @@ async function getGoogleCalendarEvent(eventId, calendarId, session) {
   }
 }
 
+async function removeGoogleEventIdForUnprocessedRecords() {
+  console.log("Checking for unprocessed records with a GoogleEventId...");
+
+  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=NOT({Processed})&pageSize=100`;
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    const recordsToUpdate = data.records
+      .filter((record) => record.fields['GoogleEventId']) // Check if GoogleEventId exists
+      .map((record) => ({
+        id: record.id,
+        fields: { GoogleEventId: null } // Set GoogleEventId to null
+      }));
+
+    if (recordsToUpdate.length === 0) {
+      console.log('No unprocessed records with GoogleEventId found.');
+      return;
+    }
+
+    console.log(`Found ${recordsToUpdate.length} unprocessed records with GoogleEventId. Removing GoogleEventId...`);
+
+    // Batch update to remove GoogleEventId for unprocessed records
+    const batchUrl = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`;
+    const batchSize = 10; // Airtable recommends batch size of 10
+
+    for (let i = 0; i < recordsToUpdate.length; i += batchSize) {
+      const batch = recordsToUpdate.slice(i, i + batchSize);
+
+      try {
+        const response = await fetch(batchUrl, {
+          method: 'PATCH',
+          headers: {
+            Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ records: batch }),
+        });
+
+        const result = await response.json();
+        if (!response.ok) {
+          console.error('Error removing GoogleEventId:', result.error);
+        } else {
+          console.log('Successfully removed GoogleEventId for batch:', result);
+        }
+      } catch (error) {
+        console.error('Error during batch update to remove GoogleEventId:', error);
+      }
+    }
+
+  } catch (error) {
+    console.error('Error fetching unprocessed records:', error);
+  }
+}
 
 
 
@@ -730,6 +856,20 @@ function App() {
       console.error('Unexpected error during logout:', err);
     }
   };
+
+  useEffect(() => {
+    const initializePage = async () => {
+      console.log('Initializing page...');
+      
+      // Call the function to uncheck Processed for records missing GoogleEventId
+      await uncheckProcessedForMissingGoogleEventId();
+  
+      // Other initialization logic...
+    };
+  
+    initializePage();
+  }, []);
+  
 
   useEffect(() => {
     const checkSession = async () => {
