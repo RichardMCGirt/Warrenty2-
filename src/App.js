@@ -3,6 +3,119 @@ import './App.css';
 import { useSession, useSupabaseClient, useSessionContext } from '@supabase/auth-helpers-react';
 import { CircularProgressbar } from 'react-circular-progressbar'; // Make sure this package is installed
 
+async function deleteDuplicateGoogleCalendarEvents(calendarId, session) {
+  if (!session || !session.provider_token) {
+    console.error('Session or provider token is not available.');
+    return;
+  }
+
+  console.log("Checking for duplicate events in Google Calendar...");
+
+  const allEvents = await fetchAllGoogleCalendarEvents(calendarId, session);
+
+  if (!allEvents || allEvents.length === 0) {
+    console.log("No events found in Google Calendar.");
+    return;
+  }
+
+  const seenEvents = new Map(); // Track unique events
+  const duplicates = []; // Track duplicate event IDs
+
+  for (const event of allEvents) {
+    const title = event.summary ? event.summary.trim().toLowerCase() : 'unknown';
+    const startTime = event.start?.dateTime || event.start?.date || 'unknown';
+
+    // Normalize time for comparison
+    const normalizeTime = (date) => {
+      const roundedDate = new Date(date);
+      roundedDate.setSeconds(0, 0); // Round to the nearest minute
+      return roundedDate.toISOString();
+    };
+
+    const uniqueKey = `${title}|${normalizeTime(startTime)}`;
+
+    // Log event data for debugging
+    console.log(`Event: ${title}, Start: ${startTime}, Unique Key: ${uniqueKey}`);
+
+    // Check if the event has already been seen
+    if (seenEvents.has(uniqueKey)) {
+      duplicates.push(event.id); // Add duplicate event ID to the list
+    } else {
+      seenEvents.set(uniqueKey, event.id); // Mark event as seen
+    }
+  }
+
+  if (duplicates.length > 0) {
+    console.log(`Found ${duplicates.length} duplicate events in Google Calendar. Deleting...`);
+    await batchDeleteGoogleCalendarEvents(duplicates, calendarId, session);
+  } else {
+    console.log("No duplicate events found in Google Calendar.");
+  }
+}
+
+
+
+
+async function batchDeleteGoogleCalendarEvents(eventIds, calendarId, session, batchSize = 10) {
+  for (let i = 0; i < eventIds.length; i += batchSize) {
+    const batch = eventIds.slice(i, i + batchSize);
+
+    try {
+      for (const eventId of batch) {
+        const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
+
+        const response = await fetch(url, {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${session.provider_token}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!response.ok) {
+          const data = await response.json();
+          console.error(`Error deleting event ${eventId}:`, data);
+        } else {
+          console.log(`Successfully deleted event ${eventId}`);
+        }
+      }
+    } catch (error) {
+      console.error('Error during batch delete of Google Calendar events:', error);
+    }
+  }
+}
+
+async function fetchAllGoogleCalendarEvents(calendarId, session) {
+  let allEvents = [];
+  let nextPageToken = null;
+
+  do {
+    const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?maxResults=2500${nextPageToken ? `&pageToken=${nextPageToken}` : ''}`;
+
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${session.provider_token}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      const data = await response.json();
+      console.error('Error fetching Google Calendar events:', data);
+      return [];
+    }
+
+    const data = await response.json();
+    allEvents = allEvents.concat(data.items);
+
+    nextPageToken = data.nextPageToken; // Get the next page token, if available
+  } while (nextPageToken);
+
+  return allEvents;
+}
+
+
+
 async function uncheckProcessedForMissingGoogleEventId() {
   console.log("Checking for records missing GoogleEventId but marked as processed...");
 
@@ -860,16 +973,33 @@ function App() {
   useEffect(() => {
     const initializePage = async () => {
       console.log('Initializing page...');
-      
-      // Call the function to uncheck Processed for records missing GoogleEventId
+  
+      // Ensure the session is available
+      if (!session || !session.provider_token) {
+        console.error('Session or provider token is not available. User may not be logged in.');
+        return;
+      }
+  
+      // 1. Uncheck "Processed" for records missing GoogleEventId (if applicable)
       await uncheckProcessedForMissingGoogleEventId();
+  
+      // 2. Delete duplicate Google Calendar events
+      await deleteDuplicateGoogleCalendarEvents(
+        'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', // Replace with your actual Google Calendar ID
+        session // Your session object with access token
+      );
   
       // Other initialization logic...
     };
   
-    initializePage();
-  }, []);
+    // Call initializePage only when the session is available
+    if (session) {
+      initializePage();
+    }
+  }, [session]); // Ensure session is available for Google Calendar API requests
   
+  
+
 
   useEffect(() => {
     const checkSession = async () => {
