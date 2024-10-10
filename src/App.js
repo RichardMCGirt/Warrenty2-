@@ -1305,7 +1305,15 @@ async function fetchAndProcessEvents() {
   console.log('No more events to process. Terminating script.');
 }
 
-  
+useEffect(() => {
+  console.log('Session details at API call:', session);
+  if (!session || !session.provider_token) {
+    console.error('Session or provider token is missing. Cannot fetch Google Calendar event.');
+  } else {
+    console.log('Proceeding with API request...');
+  }
+}, [session]);
+
 
 
   useEffect(() => {
