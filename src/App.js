@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import './App.css';
 import { useSession, useSupabaseClient, useSessionContext } from '@supabase/auth-helpers-react';
 import { CircularProgressbar } from 'react-circular-progressbar'; // Make sure this package is installed
+let isTerminated = false; // Initialize the variable early in the file
 
 async function removeStaleGoogleEventIds(calendarId, session) {
   console.log('Checking for stale GoogleEventIds in Airtable...');
@@ -243,6 +244,16 @@ async function fetchAllGoogleCalendarEvents(calendarId, session) {
   } while (nextPageToken);
 
   return allEvents;
+}
+
+function terminateScript() {
+  isTerminated = true;
+  console.log("Terminating all processes.");
+  clearAllTimers();
+}
+
+if (typeof isTerminated !== 'undefined' && isTerminated) {
+  console.log("Script is terminated. Skipping further actions.");
 }
 
 
@@ -535,19 +546,17 @@ fetchUnprocessedEventsFromAirtable().then((eventsToProcess) => {
   processEvents(eventsToProcess);
 });
 
-// Terminate the script by stopping all ongoing intervals, timeouts, or processes
-function terminateScript() {
-  console.log("All events processed. Fully terminating script.");
-  syncInProgress = false; // Reset the sync flag
 
-  // Clear any possible intervals or timeouts that might restart the sync
-  clearAllTimers();
-}
 
 function clearAllTimers() {
   const highestTimeoutId = setTimeout(() => {}, 0);
   for (let i = 0; i < highestTimeoutId; i++) {
-      clearTimeout(i);
+    clearTimeout(i);
+  }
+  // Also clear intervals
+  const highestIntervalId = setInterval(() => {}, 0);
+  for (let i = 0; i < highestIntervalId; i++) {
+    clearInterval(i);
   }
 }
 
@@ -623,7 +632,6 @@ async function populateGoogleCalendarWithAirtableRecords(
 
   if (totalFetchedRecords === 0) {
     console.log(`No unprocessed events to sync for calendar "${calendarName}".`);
-    setAllRecordsProcessed(true);
     return;
   }
 
@@ -914,6 +922,10 @@ async function removeGoogleEventIdForUnprocessedRecords() {
 }
 
 
+
+
+
+
 async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
 
@@ -996,6 +1008,8 @@ function CalendarSection({
       if (allRecordsProcessed) {
         console.log('All records have been processed. Skipping further sync attempts.');
         return; 
+        terminateScript();
+
       }
 
       // Exit if outside sync time range
@@ -1110,7 +1124,6 @@ async function removeDuplicateEvents() {
 
   if (duplicates.length > 0) {
     console.log(`Deleting ${duplicates.length} duplicates.`);
-    await batchDeleteAirtableRecords(duplicates);
   } else {
     console.log('No duplicates found.');
   }
@@ -1120,33 +1133,7 @@ async function removeDuplicateEvents() {
 
 
 
-async function batchDeleteAirtableRecords(recordIds, batchSize = 10) {
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`;
 
-  for (let i = 0; i < recordIds.length; i += batchSize) {
-    const batch = recordIds.slice(i, i + batchSize).map(id => ({ id }));
-
-    try {
-      const response = await fetch(url, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ records: batch }),
-      });
-
-      const data = await response.json();
-      if (!response.ok) {
-        console.error('Error deleting Airtable records:', data.error);
-      } else {
-        console.log('Batch of records deleted successfully:', data);
-      }
-    } catch (error) {
-      console.error('Error during batch delete request:', error);
-    }
-  }
-}
 let syncInProgress = false; // Declare globally in the component
 
 
@@ -1160,13 +1147,12 @@ function App() {
 
   const [addedRecords, setAddedRecords] = useState([]);
   const [failedRecords, setFailedRecords] = useState([]);
-  const [noChangeRecords, setNoChangeRecords] = useState([]); // State for records with no changes
-  const [changedRecords, setChangedRecords] = useState([]); // State for records with changes
+  const [noChangeRecords, setNoChangeRecords] = useState([]); 
+  const [changedRecords, setChangedRecords] = useState([]); 
   const [triggerSync, setTriggerSync] = useState(false);
   const [rateLimitHit, setRateLimitHit] = useState(false); 
-  const [timeLeft, setTimeLeft] = useState(FIFTEEN_MINUTES); // Initialize timeLeft state
-  const [percentage, setPercentage] = useState(0); // Initialize percentage state
-  const [allRecordsProcessed, setAllRecordsProcessed] = useState(false); // Define this state to track processed records
+  const [percentage, setPercentage] = useState(0); 
+  const [allRecordsProcessed, setAllRecordsProcessed] = useState(false); 
 
   const calendarInfo = [
     { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
@@ -1185,7 +1171,7 @@ function App() {
         provider: 'google',
         options: {
           scopes: 'https://www.googleapis.com/auth/calendar',
-          redirectTo: window.location.origin, // Redirect back to your app after login
+          redirectTo: window.location.origin, 
         },
       });
     } catch (loginError) {
@@ -1194,124 +1180,108 @@ function App() {
   };
 
   const handleLogout = async () => {
+    const { data: { session } } = await supabase.auth.getSession(); // Updated method
     if (!session) {
       console.error('No active session found. The user may already be logged out.');
       return;
     }
-
+  
     try {
       const { error } = await supabase.auth.signOut();
       if (error) {
         console.error('Logout failed:', error.message);
       } else {
         console.log('User logged out successfully.');
+        // Optionally clear local state or redirect the user
       }
     } catch (err) {
       console.error('Unexpected error during logout:', err);
     }
   };
-
-   // Effect to automatically trigger sync every five minutes or stop interval when all records are processed
-useEffect(() => {
-  let syncInterval;
-
-  const autoSync = async () => {
-    if (isWithinTimeRange()) {
-      console.log('Automatic sync triggered.');
-
-      const eventsToProcess = await fetchUnprocessedEventsFromAirtable();
-      console.log("Airtable events to process:", eventsToProcess.length);
-
-      if (eventsToProcess.length === 0) {
-        console.log("No more events to process. Terminating interval.");
-        clearInterval(syncInterval); // Stop the interval permanently if no more events
-        setAllRecordsProcessed(true); // Set state to indicate all records are processed
-      } else {
-        handleSyncNow(); // Proceed with sync if there are events to process
+  
+  
+  useEffect(() => {
+    const checkSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession(); // Updated method
+      if (!session) {
+        console.log('Session expired. Redirecting to login...');
+        forceLogout(); // Clear session and redirect
       }
-    } else {
-      console.log('Outside sync time range.');
+    };
+    
+  
+    checkSession();
+  }, [session]); // Depend on session changes
+  
+
+  const forceLogout = () => {
+    console.log('Forcing logout by clearing local storage...');
+    supabase.auth.setAuth(null); // Clear the auth session forcibly
+    localStorage.clear(); // Clear local storage if needed
+    // Optionally redirect the user to the login page
+    window.location.href = '/login'; // Redirect to login
+  };
+  
+
+  useEffect(() => {
+    const initializePage = async () => {
+        console.log('Initializing page...');
+
+        if (!session || !session.provider_token) {
+            console.error('Session or provider token is not available. User may not be logged in.');
+            return;
+        }
+
+        const airtableEvents = await fetchUnprocessedEventsFromAirtable(); 
+
+        if (airtableEvents.length === 0) {
+            console.log('No more events to process. Terminating script.');
+            return;
+        }
+
+        const googleEvents = await fetchCurrentAndFutureGoogleCalendarEvents(
+            'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
+            session
+        );
+
+        await compareAndSyncEvents(airtableEvents, googleEvents, session);
+
+        await uncheckProcessedForMissingGoogleEventId();
+
+        await deleteDuplicateGoogleCalendarEvents(
+            'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
+            session
+        );
+    };
+
+    if (session) {
+        initializePage();
     }
-  };
+  }, [session]);
 
-  // Only start interval if records are not processed
-  if (!allRecordsProcessed) {
-    syncInterval = setInterval(autoSync, FIVE_MINUTES); // Set interval for every 5 minutes
+  let isSyncing = false;
+
+  async function manualSync() {
+    if (isSyncing || allRecordsProcessed) {
+      console.log('Sync already in progress or all records processed, skipping...');
+      return;
+    }
+
+    isSyncing = true; 
+    console.log('Manual sync triggered...');
+
+    await fetchAndProcessEvents();
+
+    isSyncing = false; 
   }
 
-  // Clean up the interval on unmount or when records are fully processed
-  return () => clearInterval(syncInterval);
-}, [handleSyncNow, fetchUnprocessedEventsFromAirtable, allRecordsProcessed]); // Add 'allRecordsProcessed' as a dependency
-
-
-useEffect(() => {
-  const initializePage = async () => {
-      console.log('Initializing page...');
-
-      // Ensure the session is available
-      if (!session || !session.provider_token) {
-          console.error('Session or provider token is not available. User may not be logged in.');
-          return;
-      }
-
-      // Fetch all events from Google Calendar and Airtable
-      const airtableEvents = await fetchUnprocessedEventsFromAirtable(); // Correct function used here
-
-      // Check if there are any events to process
-      if (airtableEvents.length === 0) {
-          console.log('No more events to process. Terminating script.');
-          return;
-      }
-
-      const googleEvents = await fetchCurrentAndFutureGoogleCalendarEvents(
-          'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-          session
-      );
-
-      // Compare events and update Google Calendar if needed
-      await compareAndSyncEvents(airtableEvents, googleEvents, session);
-
-      // Uncheck "Processed" for records missing GoogleEventId
-      await uncheckProcessedForMissingGoogleEventId();
-
-      // Delete duplicate Google Calendar events
-      await deleteDuplicateGoogleCalendarEvents(
-          'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-          session
-      );
-  };
-
-  // Call initializePage only when the session is available
-  if (session) {
-      initializePage();
-  }
-}, [session]);
-
-let isSyncing = false; // Flag to prevent multiple syncs at once
-
-async function manualSync() {
-  if (isSyncing || allRecordsProcessed) {
-    console.log('Sync already in progress or all records processed, skipping...');
-    return;
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  isSyncing = true; // Set syncing flag to true
-  console.log('Manual sync triggered...');
+  let syncInProgress = false;
 
-  // Call the event fetching and processing function
-  await fetchAndProcessEvents();
-
-  // Sync completed
-  isSyncing = false; 
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-let syncInProgress = false;
-
-async function fetchAndProcessEvents() {
+  async function fetchAndProcessEvents() {
     if (syncInProgress) {
         console.log("Sync is already in progress, skipping new request.");
         return;
@@ -1320,82 +1290,36 @@ async function fetchAndProcessEvents() {
     syncInProgress = true;
 
     try {
-        let events = await fetchUnprocessedEventsFromAirtable(); // Fetch unprocessed events
+        let events = await fetchUnprocessedEventsFromAirtable();
 
         while (events.length > 0) {
             console.log(`Processing ${events.length} events...`);
-
-            // Process the events batch
             await processEvents(events);
 
-            // Fetch more unprocessed events after processing the current batch
             events = await fetchUnprocessedEventsFromAirtable();
-
-            // Introduce a small delay between processing batches to avoid racing conditions
-            await sleep(5000);  // Adjust delay if needed
+            await sleep(5000);
         }
 
         console.log("No more events to process. Terminating sync.");
-        
-        // Clear the sync progress flag
-        syncInProgress = false;
+
+        if (events.length === 0) {
+          console.log("All events processed, updating UI...");
+          setAllRecordsProcessed(true);
+      }
 
     } catch (error) {
         console.error("Error while processing events:", error);
-        syncInProgress = false;  // Ensure to reset flag even if an error occurs
+        syncInProgress = false; 
     }
-}
-
-// Call this function to start syncing events
-async function startSync() {
-  console.log("Starting sync process...");
-  await fetchAndProcessEvents();
-
-  if (!syncInProgress) {
-      console.log("Sync process completed. No more events.");
-      terminateScript();  // Ensure full termination
   }
-}
-// Periodic sync function with termination logic
-useEffect(() => {
-  const syncInterval = setInterval(() => {
-    if (!allRecordsProcessed) {
-      console.log("Starting periodic sync...");
-      manualSync();
-    } else {
-      console.log("All records processed. Stopping periodic sync.");
-      clearInterval(syncInterval); // Stop the interval once all records are processed
-    }
-  }, 5 * 60 * 1000); // Sync every 5 minutes
-
-  return () => clearInterval(syncInterval); // Clear interval on component unmount
-}, [allRecordsProcessed]);
-
-
-
-
-
-useEffect(() => {
-  console.log('Session details at API call:', session);
-  if (!session || !session.provider_token) {
-    console.error('Session or provider token is missing. Cannot fetch Google Calendar event.');
-  } else {
-    console.log('Proceeding with API request...');
-  }
-}, [session]);
-
-
 
   useEffect(() => {
-    const checkSession = async () => {
-      if (!session) {
-        console.log('No valid session found on startup. User needs to log in.');
-      } else {
-        console.log('Session is valid on startup:', session);
-      }
-    };
-
-    checkSession();
+    console.log('Session details at API call:', session);
+    if (!session || !session.provider_token) {
+      console.error('Session or provider token is missing. Cannot fetch Google Calendar event.');
+    } else {
+      console.log('Proceeding with API request...');
+    }
   }, [session]);
 
   const formatTime = (time) => {
@@ -1404,24 +1328,6 @@ useEffect(() => {
     return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
   };
 
-  useEffect(() => {
-    if (timeLeft > 0) {
-      const countdownInterval = setInterval(() => {
-        setTimeLeft((prevTime) => prevTime - 1000);  // Decrease countdown by 1 second
-        const progress = (FIFTEEN_MINUTES - timeLeft) / FIFTEEN_MINUTES * 100;
-        setPercentage(progress);
-      }, 1000);
-
-      return () => clearInterval(countdownInterval);  // Clear interval on unmount
-    } else {
-      setTriggerSync(true); // Trigger sync when countdown reaches 0
-      setTimeLeft(FIFTEEN_MINUTES); // Reset countdown after sync
-    }
-  }, [timeLeft]);
-
-
-
-  // Greeting function with formatted name
   const getGreeting = () => {
     if (!session || !session.user) {
       return 'Hello, Guest';
@@ -1448,53 +1354,36 @@ useEffect(() => {
     <div className="App">
       <div className="container">
         <h2>{getGreeting()}</h2> 
-        <h3 style={{ fontSize: '16px', textAlign: 'center' }}>Time Until Next Sync</h3>
-        <button onClick={handleLogout}>Logout</button>
+        <h3 style={{ fontSize: '16px', textAlign: 'center' }}>Manual Sync Only</h3>
 
-        {session && (
-          <div className="progress-section" style={{ textAlign: 'center' }}>
-            <div style={{ width: '80px', height: '80px', margin: '0 auto' }}>
-              <CircularProgressbar
-                value={percentage}
-                text={formatTime(timeLeft)}
-                styles={{
-                  path: { stroke: '#4caf50' },
-                  trail: { stroke: '#d6d6d6' },
-                  text: {
-                    fontSize: '25px',
-                    fill: '#000',
-                    dominantBaseline: 'middle',
-                    textAnchor: 'middle',
-                  },
-                }}
-              />
-            </div>
-          </div>
+        {!session ? (
+          <button onClick={handleLogin}>Sign In with Google</button> 
+        ) : (
+          <button onClick={handleLogout}>Logout</button>
         )}
 
-        <div style={{ width: '100%', margin: '0 auto' }}>
-          {session ? (
+        {session && (
+          <div style={{ width: '100%', margin: '0 auto' }}>
             <>
               <hr />
               <button onClick={handleSyncNow}>Sync Now</button> 
               <div className="calendar-grid">
                 {calendarInfo.map((calendar) => (
                 <CalendarSection
-                key={calendar.id}
-                calendarId={calendar.id}
-                calendarName={calendar.name}
-                session={session}
-                signOut={handleLogout}
-                setAddedRecords={setAddedRecords}
-                setFailedRecords={setFailedRecords}
-                setNoChangeRecords={setNoChangeRecords}
-                setChangedRecords={setChangedRecords}
-                triggerSync={triggerSync}
-                setTriggerSync={setTriggerSync}
-                allRecordsProcessed={allRecordsProcessed}
-                setAllRecordsProcessed={setAllRecordsProcessed}
-              />
-              
+                  key={calendar.id}
+                  calendarId={calendar.id}
+                  calendarName={calendar.name}
+                  session={session}
+                  signOut={handleLogout}
+                  setAddedRecords={setAddedRecords}
+                  setFailedRecords={setFailedRecords}
+                  setNoChangeRecords={setNoChangeRecords}
+                  setChangedRecords={setChangedRecords}
+                  triggerSync={triggerSync}
+                  setTriggerSync={setTriggerSync}
+                  allRecordsProcessed={allRecordsProcessed}
+                  setAllRecordsProcessed={setAllRecordsProcessed}
+                />
                 ))}
               </div>
 
@@ -1554,16 +1443,13 @@ useEffect(() => {
                   </div>
                 </div>
               </div>
+
               <button id="manualSyncButton" onClick={manualSync}>Sync Now</button>
 
               <button onClick={handleSyncNow} disabled={triggerSync}>Sync Now</button>
             </>
-          ) : (
-            <>
-              <button onClick={handleLogin}>Sign In With Google</button>
-            </>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );
