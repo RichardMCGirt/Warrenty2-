@@ -309,29 +309,25 @@ async function uncheckProcessedForMissingGoogleEventId() {
 }
 
 
+
+
+
 async function createGoogleCalendarEvent(event, calendarId, session) {
-  // First, check for duplicates
-  const existingGoogleEventId = await checkForDuplicateEvent(event, calendarId, session);
+  // Final check to ensure the event doesn't already exist in Google Calendar
+  let googleEventId = await checkForDuplicateEvent(event, calendarId, session);
   
-  if (existingGoogleEventId) {
-    console.log('Duplicate event found in Google Calendar, skipping creation:', existingGoogleEventId);
-    return existingGoogleEventId;
+  if (googleEventId) {
+    console.log(`Duplicate event found. Skipping creation for "${event.title}".`);
+    return; // Skip event creation if a duplicate exists
   }
 
-  // Create a descriptive string for the event
-  const description = `
-    ${event.description ? `Description: ${event.description}\n` : ''}
-    Homeowner Name: ${event.homeownerName}
-    Lot Number: ${event.lotNumber}
-    Community/Neighborhood: ${event.community}
-    Last Updated: ${event.lastUpdated}
-  `;
-
-  // If no duplicate found, create a new Google Calendar event
+  // Proceed with creating the event if no duplicate is found
+  console.log(`Creating new Google Calendar event for "${event.title}"...`);
+  
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
   const updatedEvent = {
     summary: event.title,
-    description: description.trim(),  // This will now include the additional fields in the description
+    description: event.description.trim(),
     start: { dateTime: event.start.toISOString() },
     end: { dateTime: event.end.toISOString() },
     location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
@@ -361,6 +357,7 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
     return null;
   }
 }
+
 
 async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, googleEventId, hasChanges) {
   if (!hasChanges) {
@@ -394,14 +391,12 @@ async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, goo
       console.error('Error updating Airtable:', data.error);
     } else {
       console.log('Airtable record successfully updated:', data);
-
-      // Add delay to ensure the record is updated properly before unlocking
-      await sleep(5000);  // Wait 5 seconds to ensure Airtable registers the update
     }
   } catch (error) {
     console.error('Error updating Airtable:', error);
   }
 }
+
 
 async function lockAirtableRecord(airtableRecordId) {
   console.log(`Locking Airtable record ${airtableRecordId}`);
@@ -434,6 +429,10 @@ async function unlockAirtableRecord(airtableRecordId) {
   console.log(`Unlocking Airtable record ${airtableRecordId}`);
 
   const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${airtableRecordId}`;
+  
+  // Add a delay to ensure Airtable has time to sync before unlocking
+  await sleep(6000); // 3 seconds delay before unlocking
+
   try {
     const response = await fetch(url, {
       method: 'PATCH',
@@ -454,6 +453,7 @@ async function unlockAirtableRecord(airtableRecordId) {
     console.error(`Failed to unlock record ${airtableRecordId}:`, error);
   }
 }
+
 
 // Function to format the LastUpdated field
 function formatLastUpdated(lastUpdated) {
@@ -535,7 +535,21 @@ fetchUnprocessedEventsFromAirtable().then((eventsToProcess) => {
   processEvents(eventsToProcess);
 });
 
+// Terminate the script by stopping all ongoing intervals, timeouts, or processes
+function terminateScript() {
+  console.log("All events processed. Fully terminating script.");
+  syncInProgress = false; // Reset the sync flag
 
+  // Clear any possible intervals or timeouts that might restart the sync
+  clearAllTimers();
+}
+
+function clearAllTimers() {
+  const highestTimeoutId = setTimeout(() => {}, 0);
+  for (let i = 0; i < highestTimeoutId; i++) {
+      clearTimeout(i);
+  }
+}
 
 
 async function checkForDuplicateEvent(event, calendarId, session, offsetMinutes = 5) {
@@ -926,8 +940,6 @@ async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
 }
 
 
-
-
 async function checkIfAllRecordsProcessed() {
   const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=NOT({Processed})&pageSize=100`;
 
@@ -942,16 +954,20 @@ async function checkIfAllRecordsProcessed() {
     const data = await response.json();
     if (data.records.length === 0) {
       console.log('All records have been processed.');
-      return 0;
+      return true; // All records are processed
     } else {
       console.log(`${data.records.length} records are still unprocessed.`);
-      return data.records.length;
+      return false;  // There are still unprocessed records
     }
   } catch (error) {
     console.error('Error checking unprocessed records:', error);
-    return -1;  // Return -1 in case of an error
+    return false;  // In case of an error, assume not all records are processed
   }
 }
+
+
+
+
 
 function CalendarSection({
   calendarId,
@@ -1102,6 +1118,8 @@ async function removeDuplicateEvents() {
 
 
 
+
+
 async function batchDeleteAirtableRecords(recordIds, batchSize = 10) {
   const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`;
 
@@ -1129,6 +1147,7 @@ async function batchDeleteAirtableRecords(recordIds, batchSize = 10) {
     }
   }
 }
+let syncInProgress = false; // Declare globally in the component
 
 
 const FIFTEEN_MINUTES = 15 * 60 * 1000;  // 15 minutes in milliseconds
@@ -1268,42 +1287,93 @@ useEffect(() => {
   }
 }, [session]);
 
-// Flag to prevent multiple syncs at once
-let isSyncing = false;
+let isSyncing = false; // Flag to prevent multiple syncs at once
 
-// Manual Sync function
 async function manualSync() {
-  if (isSyncing) {
-      console.log('Sync already in progress, skipping...');
-      return;
+  if (isSyncing || allRecordsProcessed) {
+    console.log('Sync already in progress or all records processed, skipping...');
+    return;
   }
-  
-  isSyncing = true; // Flag to indicate a sync is in progress
+
+  isSyncing = true; // Set syncing flag to true
   console.log('Manual sync triggered...');
-  
+
   // Call the event fetching and processing function
   await fetchAndProcessEvents();
-  
+
   // Sync completed
-  isSyncing = false;
+  isSyncing = false; 
 }
 
-// Event processing function
-async function fetchAndProcessEvents() {
-  let events = await fetchUnprocessedEventsFromAirtable(); // Correct function name
-  
-  while (events.length > 0) {
-      // Process the fetched events
-      await processEvents(events);
-      
-      console.log(`${events.length} events processed, fetching more...`);
-      
-      // Fetch the next batch of unprocessed events
-      events = await fetchUnprocessedEventsFromAirtable();
-  }
-  
-  console.log('No more events to process. Terminating script.');
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+let syncInProgress = false;
+
+async function fetchAndProcessEvents() {
+    if (syncInProgress) {
+        console.log("Sync is already in progress, skipping new request.");
+        return;
+    }
+
+    syncInProgress = true;
+
+    try {
+        let events = await fetchUnprocessedEventsFromAirtable(); // Fetch unprocessed events
+
+        while (events.length > 0) {
+            console.log(`Processing ${events.length} events...`);
+
+            // Process the events batch
+            await processEvents(events);
+
+            // Fetch more unprocessed events after processing the current batch
+            events = await fetchUnprocessedEventsFromAirtable();
+
+            // Introduce a small delay between processing batches to avoid racing conditions
+            await sleep(5000);  // Adjust delay if needed
+        }
+
+        console.log("No more events to process. Terminating sync.");
+        
+        // Clear the sync progress flag
+        syncInProgress = false;
+
+    } catch (error) {
+        console.error("Error while processing events:", error);
+        syncInProgress = false;  // Ensure to reset flag even if an error occurs
+    }
+}
+
+// Call this function to start syncing events
+async function startSync() {
+  console.log("Starting sync process...");
+  await fetchAndProcessEvents();
+
+  if (!syncInProgress) {
+      console.log("Sync process completed. No more events.");
+      terminateScript();  // Ensure full termination
+  }
+}
+// Periodic sync function with termination logic
+useEffect(() => {
+  const syncInterval = setInterval(() => {
+    if (!allRecordsProcessed) {
+      console.log("Starting periodic sync...");
+      manualSync();
+    } else {
+      console.log("All records processed. Stopping periodic sync.");
+      clearInterval(syncInterval); // Stop the interval once all records are processed
+    }
+  }, 5 * 60 * 1000); // Sync every 5 minutes
+
+  return () => clearInterval(syncInterval); // Clear interval on component unmount
+}, [allRecordsProcessed]);
+
+
+
+
 
 useEffect(() => {
   console.log('Session details at API call:', session);
