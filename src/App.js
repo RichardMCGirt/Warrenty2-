@@ -332,6 +332,12 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
     return; // Skip event creation if a duplicate exists
   }
 
+  // If end date is empty or invalid, set it to the same value as the start date
+  if (!event.end || isNaN(new Date(event.end).getTime())) {
+    console.log(`Invalid or missing end date for "${event.title}". Setting end date to start date.`);
+    event.end = event.start; // Set end date to start date if invalid or missing
+  }
+
   // Proceed with creating the event if no duplicate is found
   console.log(`Creating new Google Calendar event for "${event.title}"...`);
   
@@ -340,7 +346,7 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
     summary: event.title,
     description: event.description.trim(),
     start: { dateTime: event.start.toISOString() },
-    end: { dateTime: event.end.toISOString() },
+    end: { dateTime: event.end.toISOString() }, // Ensure end date is valid here
     location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
   };
 
@@ -368,6 +374,7 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
     return null;
   }
 }
+
 
 
 async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, googleEventId, hasChanges) {
@@ -883,7 +890,7 @@ async function removeGoogleEventIdForUnprocessedRecords() {
 
     if (recordsToUpdate.length === 0) {
       console.log('No unprocessed records with GoogleEventId found.');
-      return;
+            return;
     }
 
     console.log(`Found ${recordsToUpdate.length} unprocessed records with GoogleEventId. Removing GoogleEventId...`);
@@ -1153,6 +1160,7 @@ function App() {
   const [rateLimitHit, setRateLimitHit] = useState(false); 
   const [percentage, setPercentage] = useState(0); 
   const [allRecordsProcessed, setAllRecordsProcessed] = useState(false); 
+  const [timeRemaining, setTimeRemaining] = useState(15 * 60); // 15 minutes in seconds
 
   const calendarInfo = [
     { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
@@ -1161,6 +1169,7 @@ function App() {
   const handleSyncNow = () => {
     console.log('Manual sync button clicked.');
     setTriggerSync(true); 
+    resetTimer(); // Reset timer on manual sync
   };
 
   // Login handler
@@ -1192,14 +1201,74 @@ function App() {
         console.error('Logout failed:', error.message);
       } else {
         console.log('User logged out successfully.');
-        // Optionally clear local state or redirect the user
       }
     } catch (err) {
       console.error('Unexpected error during logout:', err);
     }
   };
+
+  const forceLogout = () => {
+    console.log('Forcing logout by clearing local storage...');
+    supabase.auth.setAuth(null); // Clear the auth session forcibly
+    localStorage.clear(); // Clear local storage if needed
+    window.location.href = '/login'; // Redirect to login
+  };
+
+  const initializePage = async () => {
+    console.log('Initializing page...');
+
+    if (!session || !session.provider_token) {
+        console.error('Session or provider token is not available. User may not be logged in.');
+        return;
+    }
+
+    const airtableEvents = await fetchUnprocessedEventsFromAirtable();
+
+    if (airtableEvents.length === 0) {
+        console.log('No more events to process. Terminating script.');
+        return;
+    }
+
+    const googleEvents = await fetchCurrentAndFutureGoogleCalendarEvents(
+        'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
+        session
+    );
+
+    await compareAndSyncEvents(airtableEvents, googleEvents, session);
+
+    await uncheckProcessedForMissingGoogleEventId();
+
+    await deleteDuplicateGoogleCalendarEvents(
+        'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
+        session
+    );
+  };
+
+  // Reset timer when sync is manually triggered or completes
+  const resetTimer = () => {
+    setTimeRemaining(15 * 60); // Reset to 15 minutes
+  };
+
+  // Timer logic
+  useEffect(() => {
+    if (timeRemaining > 0) {
+      const timerInterval = setInterval(() => {
+        setTimeRemaining(prevTime => prevTime - 1);
+      }, 1000);
   
-  
+      return () => clearInterval(timerInterval); // Clean up interval on unmount
+    } else {
+      manualSync(); // Auto-sync when the timer hits 0
+      resetTimer();  // Reset the timer after syncing
+    }
+  }, [timeRemaining]);
+
+  const formatTime = (timeInSeconds) => {
+    const minutes = Math.floor(timeInSeconds / 60);
+    const seconds = timeInSeconds % 60;
+    return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+  };
+
   useEffect(() => {
     const checkSession = async () => {
       const { data: { session } } = await supabase.auth.getSession(); // Updated method
@@ -1208,56 +1277,15 @@ function App() {
         forceLogout(); // Clear session and redirect
       }
     };
-    
-  
+
     checkSession();
   }, [session]); // Depend on session changes
-  
-
-  const forceLogout = () => {
-    console.log('Forcing logout by clearing local storage...');
-    supabase.auth.setAuth(null); // Clear the auth session forcibly
-    localStorage.clear(); // Clear local storage if needed
-    // Optionally redirect the user to the login page
-    window.location.href = '/login'; // Redirect to login
-  };
-  
 
   useEffect(() => {
-    const initializePage = async () => {
-        console.log('Initializing page...');
-
-        if (!session || !session.provider_token) {
-            console.error('Session or provider token is not available. User may not be logged in.');
-            return;
-        }
-
-        const airtableEvents = await fetchUnprocessedEventsFromAirtable(); 
-
-        if (airtableEvents.length === 0) {
-            console.log('No more events to process. Terminating script.');
-            return;
-        }
-
-        const googleEvents = await fetchCurrentAndFutureGoogleCalendarEvents(
-            'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-            session
-        );
-
-        await compareAndSyncEvents(airtableEvents, googleEvents, session);
-
-        await uncheckProcessedForMissingGoogleEventId();
-
-        await deleteDuplicateGoogleCalendarEvents(
-            'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-            session
-        );
-    };
-
     if (session) {
-        initializePage();
+        initializePage(); // This will now reference the defined function
     }
-  }, [session]);
+  }, [session]); // Depend on session changes
 
   let isSyncing = false;
 
@@ -1273,10 +1301,6 @@ function App() {
     await fetchAndProcessEvents();
 
     isSyncing = false; 
-  }
-
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   let syncInProgress = false;
@@ -1297,11 +1321,9 @@ function App() {
             await processEvents(events);
 
             events = await fetchUnprocessedEventsFromAirtable();
-            await sleep(5000);
         }
 
         console.log("No more events to process. Terminating sync.");
-
         if (events.length === 0) {
           console.log("All events processed, updating UI...");
           setAllRecordsProcessed(true);
@@ -1313,39 +1335,6 @@ function App() {
     }
   }
 
-  useEffect(() => {
-    console.log('Session details at API call:', session);
-    if (!session || !session.provider_token) {
-      console.error('Session or provider token is missing. Cannot fetch Google Calendar event.');
-    } else {
-      console.log('Proceeding with API request...');
-    }
-  }, [session]);
-
-  const formatTime = (time) => {
-    const minutes = Math.floor(time / 60000);
-    const seconds = Math.floor((time % 60000) / 1000);
-    return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
-  };
-
-  const getGreeting = () => {
-    if (!session || !session.user) {
-      return 'Hello, Guest';
-    }
-
-    const currentHour = new Date().getHours();
-    let name = session.user.email.split('@')[0];
-    name = name.replace(/\./g, ' ').split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
-
-    if (currentHour < 12) {
-      return `Good morning, ${name}`;
-    } else if (currentHour < 18) {
-      return `Good afternoon, ${name}`;
-    } else {
-      return `Good evening, ${name}`;
-    }
-  };
-
   if (isLoading) {
     return <div>Loading...</div>;
   }
@@ -1353,7 +1342,7 @@ function App() {
   return (
     <div className="App">
       <div className="container">
-        <h2>{getGreeting()}</h2> 
+        <h2>{`Good ${new Date().getHours() < 12 ? 'Morning' : 'Afternoon'}, ${session?.user?.email || 'Guest'}`}</h2> 
         <h3 style={{ fontSize: '16px', textAlign: 'center' }}>Manual Sync Only</h3>
 
         {!session ? (
@@ -1366,7 +1355,8 @@ function App() {
           <div style={{ width: '100%', margin: '0 auto' }}>
             <>
               <hr />
-              <button onClick={handleSyncNow}>Sync Now</button> 
+              <button onClick={handleSyncNow}>Sync Now</button>
+              <p>Next auto-sync in: {formatTime(timeRemaining)}</p> {/* Timer UI */}
               <div className="calendar-grid">
                 {calendarInfo.map((calendar) => (
                 <CalendarSection
@@ -1399,25 +1389,12 @@ function App() {
                         ))}
                       </ul>
                     ) : (
-                      <p>No records added.</p>
+                      <p>No records added yet.</p>
                     )}
                   </div>
 
-                  <div className="failed-records">
-                    <h4>Failed to Add Records:</h4>
-                    {failedRecords.length > 0 ? (
-                      <ul>
-                        {failedRecords.map((record, index) => (
-                          <li key={index}>{record}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p>No records failed.</p>
-                    )}
-                  </div>
-
-                  <div className="change-records">
-                    <h4>Records with no Changes:</h4>
+                  <div className="changed-records">
+                    <h4>Successfully Updated Records:</h4>
                     {changedRecords.length > 0 ? (
                       <ul>
                         {changedRecords.map((record, index) => (
@@ -1425,12 +1402,25 @@ function App() {
                         ))}
                       </ul>
                     ) : (
-                      <p>No records without changes.</p>
+                      <p>No records updated yet.</p>
+                    )}
+                  </div>
+
+                  <div className="failed-records">
+                    <h4>Failed Records:</h4>
+                    {failedRecords.length > 0 ? (
+                      <ul>
+                        {failedRecords.map((record, index) => (
+                          <li key={index}>{record}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>No records failed yet.</p>
                     )}
                   </div>
 
                   <div className="no-change-records">
-                    <h4>Records with Changes:</h4>
+                    <h4>Records with No Changes:</h4>
                     {noChangeRecords.length > 0 ? (
                       <ul>
                         {noChangeRecords.map((record, index) => (
@@ -1438,15 +1428,11 @@ function App() {
                         ))}
                       </ul>
                     ) : (
-                      <p>No records with changes.</p>
+                      <p>No unchanged records.</p>
                     )}
                   </div>
                 </div>
               </div>
-
-              <button id="manualSyncButton" onClick={manualSync}>Sync Now</button>
-
-              <button onClick={handleSyncNow} disabled={triggerSync}>Sync Now</button>
             </>
           </div>
         )}
@@ -1454,6 +1440,7 @@ function App() {
     </div>
   );
 }
+
 
 // Helper function to check time range
 const isWithinTimeRange = () => {
