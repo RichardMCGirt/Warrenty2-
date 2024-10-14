@@ -4,6 +4,70 @@ import { useSession, useSupabaseClient, useSessionContext } from '@supabase/auth
 import { CircularProgressbar } from 'react-circular-progressbar'; // Make sure this package is installed
 let isTerminated = false; // Initialize the variable early in the file
 
+
+async function updateCalendarLinkForSavannah() {
+  const airtableUrl = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula={Branch}="Savannah"`;
+
+  try {
+    const response = await fetch(airtableUrl, {
+      headers: {
+        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    // Check if there are records to update
+    if (data.records.length === 0) {
+      console.log("No records with branch 'Savannah' found.");
+      return;
+    }
+
+    // Step 2: Update the Calendar Link field for each record
+    const recordsToUpdate = data.records.map((record) => ({
+      id: record.id,
+      fields: {
+        'Calendar Link': 'https://calendar.google.com/calendar/embed?src=c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de%40group.calendar.google.com&ctz=America%2FToronto',
+      },
+    }));
+
+    await updateAirtableRecords(recordsToUpdate);
+  } catch (error) {
+    console.error('Error fetching records from Airtable:', error);
+  }
+}
+
+// Helper function to update records in Airtable
+async function updateAirtableRecords(records) {
+  const airtableUrl = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`;
+  const batchSize = 10; // Airtable recommends batch size of 10
+
+  for (let i = 0; i < records.length; i += batchSize) {
+    const batch = records.slice(i, i + batchSize);
+    try {
+      const response = await fetch(airtableUrl, {
+        method: 'PATCH',
+        headers: {
+          Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ records: batch }),
+      });
+
+      const result = await response.json();
+      if (!response.ok) {
+        console.error('Error updating Airtable records:', result.error);
+      } else {
+        console.log('Successfully updated Airtable records:', result);
+      }
+    } catch (error) {
+      console.error('Error during batch update to Airtable:', error);
+    }
+  }
+}
+
+
 async function removeStaleGoogleEventIds(calendarId, session) {
   console.log('Checking for stale GoogleEventIds in Airtable...');
 
@@ -1238,6 +1302,8 @@ let syncInProgress = false; // Declare globally in the component
 
 
 const FIFTEEN_MINUTES = 15 * 60 * 1000;  // 15 minutes in milliseconds
+const ONE_SECOND = 1000;
+
 const FIVE_MINUTES = 5 * 60 * 1000; // Five minutes in milliseconds
 
 function App() {
@@ -1253,6 +1319,8 @@ function App() {
   const [rateLimitHit, setRateLimitHit] = useState(false); 
   const [percentage, setPercentage] = useState(0); 
   const [allRecordsProcessed, setAllRecordsProcessed] = useState(false); 
+  const [timeLeft, setTimeLeft] = useState(FIFTEEN_MINUTES / ONE_SECOND); // Countdown state
+
 
   const calendarInfo = [
     { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
@@ -1331,7 +1399,10 @@ function App() {
         console.error('Session or provider token is not available.');
         return;
       }
-  
+
+      // Step 1: Update Calendar Link for Savannah branch
+      await updateCalendarLinkForSavannah(); // Update the Calendar Link field for Savannah
+      
       // Fetch Airtable events with future start dates
       const airtableEvents = await fetchAirtableEventsWithFutureStartDates();
   
@@ -1351,7 +1422,7 @@ function App() {
       initializePage();
     }
   }, [session]);  // Ensure the effect depends on the session
-  
+
 
   let isSyncing = false;
 
