@@ -4,6 +4,8 @@ import { useSession, useSupabaseClient, useSessionContext } from '@supabase/auth
 import { CircularProgressbar } from 'react-circular-progressbar'; // Circular progress indicator
 import 'react-circular-progressbar/dist/styles.css'; // Ensure you have this for styles
 import { Button, Card, Tooltip, Modal, Spin } from 'antd'; // Using Ant Design for improved UI components
+import { DateTime } from 'luxon'; // Using Luxon to handle timezones
+
 let isTerminated = false; // Initialize the variable early in the file
 
 async function removeStaleGoogleEventIds(calendarId, session) {
@@ -1168,23 +1170,53 @@ function App() {
     { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
   ];
 
-  // Timer logic for auto-sync
-  useEffect(() => {
-    if (timeRemaining > 0) {
-      const timerInterval = setInterval(() => {
-        setTimeRemaining((prevTime) => prevTime - 1);
-      }, 1000);
+// Timer logic for auto-sync
+useEffect(() => {
+  // Function to calculate time remaining to next quarter hour in New York timezone
+  const calculateTimeToNextQuarterHour = () => {
+    const nyTime = DateTime.now().setZone('America/New_York'); // Get current time in New York timezone
+    let nextQuarterHour;
 
-      return () => clearInterval(timerInterval); // Clean up interval on unmount
+    // Determine next quarter-hour (00, 15, 30, 45)
+    if (nyTime.minute < 15) {
+      nextQuarterHour = nyTime.set({ minute: 15, second: 0 });
+    } else if (nyTime.minute < 30) {
+      nextQuarterHour = nyTime.set({ minute: 30, second: 0 });
+    } else if (nyTime.minute < 45) {
+      nextQuarterHour = nyTime.set({ minute: 45, second: 0 });
     } else {
-      manualSync(); // Auto-sync when the timer hits 0
-      resetTimer(); // Reset the timer after syncing
+      nextQuarterHour = nyTime.plus({ hour: 1 }).set({ minute: 0, second: 0 });
     }
-  }, [timeRemaining]);
 
-  const resetTimer = () => {
-    setTimeRemaining(15 * 60); // Reset to 15 minutes
+    // Calculate the remaining time in seconds
+    const timeToNextQuarterHour = nextQuarterHour.diff(nyTime, 'seconds').seconds;
+    return Math.floor(timeToNextQuarterHour); // Return remaining time in seconds
   };
+
+  // Set initial time remaining to next quarter hour
+  setTimeRemaining(calculateTimeToNextQuarterHour());
+
+  // Create an interval to update the countdown every second
+  const countdownInterval = setInterval(() => {
+    setTimeRemaining((prevTime) => {
+      if (prevTime > 0) {
+        return prevTime - 1; // Decrement timer by 1 second
+      } else {
+        return calculateTimeToNextQuarterHour(); // Reset to next quarter hour when countdown reaches 0
+      }
+    });
+  }, 1000); // Update every second
+
+  // Cleanup interval on component unmount
+  return () => clearInterval(countdownInterval);
+}, []);
+
+
+// Reset the 15-minute timer
+const resetTimer = () => {
+  setTimeRemaining(15 * 60); // Reset to 15 minutes
+};
+
 
   const handleLogin = async () => {
     try {
@@ -1203,7 +1235,6 @@ function App() {
 
   const initializePage = async () => {
     if (!session || !session.provider_token) {
-      console.error('Session or provider token is not available.');
       return;
     }
     
@@ -1330,20 +1361,24 @@ function App() {
   }, []);
 
   if (isLoading) {
-    return <div><Spin tip="Loading..." /></div>;
+    return (
+      <div>
+        <Spin tip="Loading..." />
+      </div>
+    );
   }
-
+  
   return (
     <div className="App">
       <div className="container">
         <h2>{`Good ${new Date().getHours() < 12 ? 'Morning' : 'Afternoon'}, ${session?.user?.email || 'Guest'}`}</h2>
-
+  
         {!session ? (
           <Button type="primary" onClick={handleLogin}>Sign In with Google</Button>
         ) : (
           <Button danger onClick={showLogoutModal}>Logout</Button>
         )}
-
+  
         {session && (
           <>
             <Card
@@ -1352,10 +1387,15 @@ function App() {
               style={{ width: 400, margin: '20px auto' }}
             >
               <Tooltip title="Syncing will pull data from Google Calendar and update Airtable">
-                <Button type="primary" onClick={handleSyncNow} disabled={syncInProgress || allRecordsProcessed}>
+                <Button
+                  type="primary"
+                  onClick={handleSyncNow}
+                  disabled={syncInProgress || allRecordsProcessed}
+                >
                   {syncInProgress ? <Spin /> : 'Sync Now'}
                 </Button>
               </Tooltip>
+  
               <p style={{ marginTop: 15 }}>Next auto-sync in: {`${Math.floor(timeRemaining / 60)}:${(timeRemaining % 60).toString().padStart(2, '0')}`}</p>
               <CircularProgressbar
                 value={100 - (timeRemaining / 900) * 100} // Assuming 15 mins countdown
@@ -1369,15 +1409,16 @@ function App() {
           </>
         )}
 
-        <Modal
-          title="Confirm Logout"
-          visible={logoutModalVisible}
-          onOk={handleLogoutConfirm}
-          onCancel={() => setLogoutModalVisible(false)}
-          okText="Logout"
-        >
-          <p>Are you sure you want to logout?</p>
-        </Modal>
+<Modal
+  title="Confirm Logout"
+  open={logoutModalVisible}  // Replacing `visible` with `open`
+  onOk={handleLogoutConfirm}
+  onCancel={() => setLogoutModalVisible(false)}
+  okText="Logout"
+>
+  <p>Are you sure you want to logout?</p>
+</Modal>
+
       </div>
     </div>
   );
