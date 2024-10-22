@@ -861,57 +861,26 @@ async function compareAndSyncEvents(airtableEvents, googleEvents, session, calen
     const googleEvent = googleEvents.find(event => event.id === airtableEvent.googleEventId);
 
     if (googleEvent) {
-      // Compare the event's details (excluding dates)
-      const hasNonDateChanges = isEventContentDifferent(airtableEvent, googleEvent);
+      // Compare the events' details
+      if (isEventDifferent(airtableEvent, googleEvent)) {
+        console.log(`Event "${airtableEvent.title}" has changed. Deleting Google Calendar event and updating Airtable...`);
 
-      // If there are non-date differences, update the Google Calendar event
-      if (hasNonDateChanges) {
-        console.log(`Event "${airtableEvent.title}" has non-date changes. Updating Google Calendar event...`);
-        const isUpdated = await updateGoogleCalendarEvent(googleEvent.id, airtableEvent, calendarId, session);
+        // Delete the Google Calendar event
+        const isDeleted = await deleteGoogleCalendarEvent(googleEvent.id, calendarId, session);
 
-        if (isUpdated) {
-          console.log(`Google Calendar event "${airtableEvent.title}" updated successfully.`);
-          await updateAirtableWithGoogleEventIdAndProcessed(airtableEvent.id, googleEvent.id, true); // Mark as processed
-        }
-      } else if (isEventDateDifferent(airtableEvent, googleEvent)) {
-        console.log(`Event "${airtableEvent.title}" date has changed. Updating date in Google Calendar...`);
-        const isUpdated = await updateGoogleCalendarEvent(googleEvent.id, airtableEvent, calendarId, session);
-
-        if (isUpdated) {
-          console.log(`Google Calendar event "${airtableEvent.title}" date updated successfully.`);
-          await updateAirtableWithGoogleEventIdAndProcessed(airtableEvent.id, googleEvent.id, true); // Mark as processed
+        if (isDeleted) {
+          // Update the Airtable record: remove GoogleEventId and uncheck Processed
+          await updateAirtableWithGoogleEventIdAndProcessed(airtableEvent.id, null, false);  // Mark as unprocessed
+          console.log(`Airtable record "${airtableEvent.title}" marked as unprocessed.`);
         }
       } else {
         console.log(`Event "${airtableEvent.title}" is up-to-date. No action needed.`);
       }
     } else if (!airtableEvent.googleEventId) {
-      // Handle case where there is no GoogleEventId in Airtable (create new event)
-      console.log(`No matching Google Calendar event found for "${airtableEvent.title}". Creating a new event.`);
-      const newGoogleEventId = await createGoogleCalendarEvent(airtableEvent, calendarId, session);
-
-      if (newGoogleEventId) {
-        console.log(`New Google Calendar event created for "${airtableEvent.title}".`);
-        await updateAirtableWithGoogleEventIdAndProcessed(airtableEvent.id, newGoogleEventId, true); // Mark as processed
-      }
+      // Handle case where the GoogleEventId is missing
+      console.log(`No matching Google Calendar event found for "${airtableEvent.title}". A new event will be created.`);
     }
   }
-}
-
-function isEventContentDifferent(airtableEvent, googleEvent) {
-  return (
-    airtableEvent.title !== googleEvent.summary ||
-    airtableEvent.description !== googleEvent.description ||
-    airtableEvent.location !== googleEvent.location
-  );
-}
-function isEventDateDifferent(airtableEvent, googleEvent) {
-  const airtableStart = new Date(airtableEvent.start).toISOString();
-  const airtableEnd = new Date(airtableEvent.end).toISOString();
-
-  const googleStart = googleEvent.start.dateTime || googleEvent.start.date;
-  const googleEnd = googleEvent.end.dateTime || googleEvent.end.date;
-
-  return airtableStart !== googleStart || airtableEnd !== googleEnd;
 }
 
 
@@ -1233,11 +1202,9 @@ function App() {
     { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
   ].sort((a, b) => a.name.localeCompare(b.name));
 
-  // Manual Sync Now Handler
   const handleSyncNow = () => {
     console.log('Manual sync button clicked.');
-    setTriggerSync(true);
-    setLastSyncTime(new Date());
+    setTriggerSync(true); 
   };
 
   // Login handler
@@ -1344,30 +1311,7 @@ function App() {
     }
   }, [session]);  // Ensure the effect depends on the session
 
-// Automated Sync Trigger every 15 minutes
-useEffect(() => {
-  const intervalId = setInterval(() => {
-    console.log('Automated sync triggered.');
-    setTriggerSync(true); // Trigger sync automatically
-    setLastSyncTime(new Date());
-  }, FIFTEEN_MINUTES); // Trigger every 15 minutes
 
-  // Cleanup the interval when the component unmounts
-  return () => clearInterval(intervalId);
-}, []);
-
-// Sync Process (triggered by manual or automated sync)
-useEffect(() => {
-  if (triggerSync) {
-    // Perform the sync operation here
-    console.log('Sync process started...');
-    // Simulate a sync operation or call your sync function here
-    setTimeout(() => {
-      console.log('Sync process completed.');
-      setTriggerSync(false); // Reset trigger after sync is done
-    }, 2000); // Simulate 2-second sync operation
-  }
-}, [triggerSync]);
   let isSyncing = false;
 
   async function manualSync() {
@@ -1459,28 +1403,19 @@ useEffect(() => {
     <div className="App">
       <div className="container">
         <h2>{getGreeting()}</h2> 
-        <h3 style={{ fontSize: '16px', textAlign: 'center' }}>Manual and Automated Sync</h3>
-  
-        {/* Authentication: Login or Logout Button */}
+        <h3 style={{ fontSize: '16px', textAlign: 'center' }}>Manual Sync Only</h3>
+
         {!session ? (
           <button onClick={handleLogin}>Sign In with Google</button>
         ) : (
           <button onClick={handleLogout}>Logout</button>
         )}
-  
-        {/* Display Sync Info when the session exists */}
+
         {session && (
           <div style={{ width: '100%', margin: '0 auto' }}>
             <>
               <hr />
-  
-              {/* Manual Sync Button */}
               <button onClick={handleSyncNow}>Sync Now</button>
-  
-              {/* Display last sync time */}
-              {lastSyncTime && <p>Last sync time: {lastSyncTime.toLocaleString()}</p>}
-  
-              {/* Calendar Sync Sections */}
               <div className="calendar-grid">
                 {calendarInfo.map((calendar) => (
                   <CalendarSection
@@ -1500,7 +1435,6 @@ useEffect(() => {
                   />
                 ))}
               </div>
-   
 
               <div className="records-summary">
                 <h3>Records Summary</h3>
