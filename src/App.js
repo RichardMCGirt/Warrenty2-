@@ -259,65 +259,7 @@ if (typeof isTerminated !== 'undefined' && isTerminated) {
 
 
 
-async function uncheckProcessedForMissingGoogleEventId() {
-  console.log("Checking for records missing GoogleEventId but marked as processed...");
 
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=AND({Processed}, NOT({GoogleEventId}))&pageSize=100`;
-
-  try {
-    const response = await fetch(url, {
-      headers: {
-        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-        'Content-Type': 'application/json',
-      },
-    });
-
-    const data = await response.json();
-
-    const recordsToUpdate = data.records.map((record) => ({
-      id: record.id,
-      fields: { Processed: false }, // Uncheck Processed
-    }));
-
-    if (recordsToUpdate.length === 0) {
-      console.log('No records found where Processed is checked but GoogleEventId is missing.');
-      return;
-    }
-
-    console.log(`Found ${recordsToUpdate.length} records to uncheck Processed.`);
-
-    // Batch update to uncheck Processed for those records
-    const batchUrl = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`;
-    const batchSize = 10; // Airtable recommends batch size of 10
-
-    for (let i = 0; i < recordsToUpdate.length; i += batchSize) {
-      const batch = recordsToUpdate.slice(i, i + batchSize);
-
-      try {
-        const response = await fetch(batchUrl, {
-          method: 'PATCH',
-          headers: {
-            Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ records: batch }),
-        });
-
-        const result = await response.json();
-        if (!response.ok) {
-          console.error('Error unchecking Processed:', result.error);
-        } else {
-          console.log('Successfully unchecked Processed for batch:', result);
-        }
-      } catch (error) {
-        console.error('Error during batch update to uncheck Processed:', error);
-      }
-    }
-
-  } catch (error) {
-    console.error('Error fetching records for unchecking Processed:', error);
-  }
-}
 
 
 
@@ -1222,7 +1164,6 @@ function App() {
 
         await compareAndSyncEvents(airtableEvents, googleEvents, session);
 
-        await uncheckProcessedForMissingGoogleEventId();
 
         await deleteDuplicateGoogleCalendarEvents(
             'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
