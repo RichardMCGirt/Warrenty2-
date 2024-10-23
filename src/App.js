@@ -1,103 +1,48 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
-import { SessionContextProvider } from '@supabase/auth-helpers-react';
-import supabase from './supabaseClient'; // Ensure the correct path to your Supabase client
-
 import { useSession, useSupabaseClient, useSessionContext } from '@supabase/auth-helpers-react';
 let isTerminated = false; // Initialize the variable early in the file
 
-async function syncAirtableToGoogleCalendar() {
-  const googleEvents = await fetchAllGoogleCalendarEvents; // Fetch Google Calendar events
-
-  const airtableRecords = await fetchUnprocessedEventsFromAirtable(); // Fetch records from Airtable
-  processAirtableRecords(airtableRecords, googleEvents); // Process records and check for duplicates
-}
-
-function processAirtableRecords(airtableRecords, googleEvents) {
-  for (const record of airtableRecords) {
-      // Check if record has a GoogleEventId already
-      if (record.fields['GoogleEventId']) {
-          console.log(`Event already exists for ${record.fields['Calendar Event Name']}, skipping creation.`);
-          continue; // Skip if GoogleEventId exists in Airtable
-      }
-
-      // Check for duplicates in Google Calendar
-      const duplicate = googleEvents.find(event => 
-          event.summary === record.fields['Calendar Event Name'] &&
-          event.start.dateTime === record.fields['StartDate'] &&
-          event.id === record.fields['GoogleEventId']
-      );
-
-      if (duplicate) {
-          console.log(`Duplicate found for ${record.fields['Calendar Event Name']}, skipping creation.`);
-          continue; // Skip creation if a duplicate is found
-      }
-
-      // If no duplicate is found, create a new event in Google Calendar
-      createGoogleCalendarEvent(record);
+async function processEvents(events, calendarId, session) {
+  if (!session || !session.provider_token) {
+    console.error('Session or provider token is missing.');
+    return;
   }
-}
 
-
-
-async function updateCalendarLinkForSavannah() {
-  const airtableUrl = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula={Branch}="Savannah"`;
-
-  try {
-    const response = await fetch(airtableUrl, {
-      headers: {
-        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-        'Content-Type': 'application/json',
-      },
-    });
-
-    const data = await response.json();
-
-    // Check if there are records to update
-    if (data.records.length === 0) {
-      console.log("No records with branch 'Savannah' found.");
-      return;
-    }
-
-    // Step 2: Update the Calendar Link field for each record
-    const recordsToUpdate = data.records.map((record) => ({
-      id: record.id,
-      fields: {
-        'Calendar Link': 'https://calendar.google.com/calendar/embed?src=c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a%40group.calendar.google.com&ctz=America%2FToronto',
-      },
-    }));
-
-    await updateAirtableRecords(recordsToUpdate);
-  } catch (error) {
-    console.error('Error fetching records from Airtable:', error);
-  }
-}
-
-// Helper function to update records in Airtable
-async function updateAirtableRecords(records) {
-  const airtableUrl = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ`;
-  const batchSize = 10; // Airtable recommends batch size of 10
-
-  for (let i = 0; i < records.length; i += batchSize) {
-    const batch = records.slice(i, i + batchSize);
+  for (const event of events) {
     try {
-      const response = await fetch(airtableUrl, {
-        method: 'PATCH',
-        headers: {
-          Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ records: batch }),
-      });
+      // Lock the event in Airtable
+      await lockAirtableRecord(event.id);
 
-      const result = await response.json();
-      if (!response.ok) {
-        console.error('Error updating Airtable records:', result.error);
+      // Check if an event already exists in Google Calendar
+      const googleEventId = await checkForDuplicateEvent(event, calendarId, session);
+
+      if (googleEventId) {
+        // Fetch the existing Google Calendar event
+        const googleEvent = await getGoogleCalendarEvent(googleEventId, calendarId, session);
+
+        if (isEventDifferent(event, googleEvent)) {
+          // If the event has changed, delete the old one and create a new one
+          await deleteGoogleCalendarEvent(googleEventId, calendarId, session);
+          const newGoogleEventId = await createGoogleCalendarEvent(event, calendarId, session);
+          await updateAirtableWithGoogleEventIdAndProcessed(event.id, newGoogleEventId, true);
+        } else {
+          console.log(`Event "${event.title}" has no changes.`);
+        }
       } else {
-        console.log('Successfully updated Airtable records:', result);
+        // If the event doesn't exist in Google Calendar, create it
+        const newGoogleEventId = await createGoogleCalendarEvent(event, calendarId, session);
+        if (newGoogleEventId) {
+          await updateAirtableWithGoogleEventIdAndProcessed(event.id, newGoogleEventId, true);
+        }
       }
+
+      // Unlock the event in Airtable
+      await unlockAirtableRecord(event.id);
     } catch (error) {
-      console.error('Error during batch update to Airtable:', error);
+      console.error(`Error processing event "${event.title}":`, error);
+      // Make sure the record is unlocked in case of an error
+      await unlockAirtableRecord(event.id);
     }
   }
 }
@@ -122,41 +67,40 @@ async function deleteDuplicateGoogleCalendarEvents(calendarId, session) {
     return;
   }
 
-  const seenEvents = new Map(); // Track unique events by a combination of event properties
+  const seenEvents = new Map(); // Track unique events
   const duplicates = []; // Track duplicate event IDs
 
   for (const event of allEvents) {
     const title = event.summary ? event.summary.trim().toLowerCase() : 'unknown';
     const startTime = event.start?.dateTime || event.start?.date || 'unknown';
-    const endTime = event.end?.dateTime || event.end?.date || 'unknown';
-    const location = event.location ? event.location.trim().toLowerCase() : 'unknown';
 
-    // Normalize times for comparison
+    // Normalize time for comparison
     const normalizeTime = (date) => {
       const roundedDate = new Date(date);
       roundedDate.setSeconds(0, 0); // Round to the nearest minute
       return roundedDate.toISOString();
     };
 
-    const uniqueKey = `${title}|${normalizeTime(startTime)}|${normalizeTime(endTime)}|${location}`;
+    const uniqueKey = `${title}|${normalizeTime(startTime)}`;
 
     // Log event data for debugging
-    console.log(`Event: ${title}, Start: ${startTime}, End: ${endTime}, Location: ${location}, Unique Key: ${uniqueKey}`);
+    console.log(`Event: ${title}, Start: ${startTime}, Unique Key: ${uniqueKey}`);
 
     // Check if the event has already been seen
     if (seenEvents.has(uniqueKey)) {
       const existingEventId = seenEvents.get(uniqueKey);
-
-      // If either event ID is found in Airtable, mark the newer ones as duplicates
+      
+      // If the GoogleEventId is the same, it's likely a duplicate
       if (airtableGoogleEventIds.has(event.id) || airtableGoogleEventIds.has(existingEventId)) {
-        if (!duplicates.includes(event.id)) {
+        // Skip deleting the original, but mark the rest as duplicates
+        if (!duplicates.includes(existingEventId)) {
           duplicates.push(event.id); // Add duplicate event ID to the list
         }
       } else {
-        seenEvents.set(uniqueKey, event.id); // Mark new unique event as seen
+        seenEvents.set(uniqueKey, event.id); // Mark event as seen
       }
     } else {
-      seenEvents.set(uniqueKey, event.id); // Mark event as seen for the first time
+      seenEvents.set(uniqueKey, event.id); // Mark event as seen
     }
   }
 
@@ -167,7 +111,6 @@ async function deleteDuplicateGoogleCalendarEvents(calendarId, session) {
     console.log("No duplicate events found in Google Calendar.");
   }
 }
-
 
 
 // Fetch all GoogleEventId from Airtable
@@ -197,12 +140,6 @@ async function fetchGoogleEventIdsFromAirtable() {
 
   return airtableGoogleEventIds;
 }
-let isSyncing = false;
-
-
-
-
-
 
 async function batchDeleteGoogleCalendarEvents(eventIds, calendarId, session, batchSize = 10) {
   for (let i = 0; i < eventIds.length; i += batchSize) {
@@ -276,29 +213,36 @@ if (typeof isTerminated !== 'undefined' && isTerminated) {
 }
 
 
-
-
-
-
 async function createGoogleCalendarEvent(event, calendarId, session) {
-  // Safely access fields using optional chaining and provide default values if fields are missing
-  const streetAddress = event.fields?.['Street Address'] || 'No address provided';
-  const city = event.fields?.City || 'Unknown city';
-  const state = event.fields?.State || 'Unknown state';
-  const zipCode = event.fields?.['Zip Code'] || 'Unknown zip code';
-
-  const location = `${streetAddress}, ${city}, ${state}, ${zipCode}`;
+  // Final check to ensure the event doesn't already exist in Google Calendar
+  let googleEventId = await checkForDuplicateEvent(event, calendarId, session);
+  
+  if (googleEventId) {
+    console.log(`Duplicate event found. Skipping creation for "${event.title}".`);
+    return; // Skip event creation if a duplicate exists
+  }
 
   console.log(`Creating new Google Calendar event for "${event.title}"...`);
 
-  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
+  // Construct the event description with additional fields
+  let eventDescription = `Homeowner: ${event.homeownerName}\n`;
+  if (event.billable) {
+    eventDescription += `Billable: Yes\nRepair Charge: $${event.repairChargeAmount}\nReason: ${event.billableReason}\n`;
+  } else {
+    eventDescription += `Billable: No\n`;
+  }
+  eventDescription += event.description.trim();  // Append the regular description if available
+
+  // Map Airtable fields to Google Calendar event fields
   const updatedEvent = {
     summary: event.title,
-    description: event.description.trim(),
+    description: eventDescription,  // Updated description with new fields
     start: { dateTime: event.start.toISOString() },
     end: { dateTime: event.end.toISOString() },
-    location, // Use the constructed location string
+    location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
   };
+
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
 
   try {
     const response = await fetch(url, {
@@ -313,7 +257,6 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
     const data = await response.json();
     if (response.ok) {
       console.log('Event created successfully with ID:', data.id);
-      await updateAirtableWithGoogleEventIdAndProcessed(event.id, data.id, true);
       return data.id;
     } else {
       console.error('Failed to create event:', data);
@@ -327,14 +270,21 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
 
 
 
-async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, googleEventId, processed) {
-  console.log(`Updating Airtable record ${airtableRecordId}. Google Event ID: ${googleEventId}, Processed: ${processed}`);
+
+
+async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, googleEventId, hasChanges) {
+  if (!hasChanges) {
+    console.log(`No changes found for record ${airtableRecordId}. Skipping update.`);
+    return; // Exit the function if no changes are found
+  }
+
+  console.log(`Updating Airtable record ${airtableRecordId} with Google Event ID: ${googleEventId} and marking as processed`);
 
   const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${airtableRecordId}`;
   const updateData = {
     fields: {
-      GoogleEventId: googleEventId,  // Set GoogleEventId to null if deleted
-      Processed: processed,          // Set Processed to false to mark for future processing
+      GoogleEventId: googleEventId,
+      Processed: true, // Mark the record as processed to avoid duplicate syncs
       LastUpdated: new Date().toISOString(),
     },
   };
@@ -359,7 +309,6 @@ async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, goo
     console.error('Error updating Airtable:', error);
   }
 }
-
 
 
 async function lockAirtableRecord(airtableRecordId) {
@@ -418,12 +367,8 @@ async function unlockAirtableRecord(airtableRecordId) {
   }
 }
 
-
-
-// Fetch unprocessed events from Airtable
 async function fetchUnprocessedEventsFromAirtable() {
   console.log('Fetching unprocessed events from Airtable...');
-  
   const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=NOT({Processed})&pageSize=100`;
 
   try {
@@ -441,17 +386,22 @@ async function fetchUnprocessedEventsFromAirtable() {
       start: new Date(record.fields['StartDate']),
       end: new Date(record.fields['EndDate']),
       description: record.fields['description'] || '',
-      googleEventId: record.fields['GoogleEventId'] || null,
-      homeownerName: record.fields['Homeowner Name'] || 'Unknown',
-      lotNumber: record.fields['Lot Number'] || 'Unknown',
-      community: record.fields['Community/Neighborhood'] || 'Unknown',
       processed: record.fields['Processed'] || false,
+      streetAddress: record.fields['Street Address'] || '', 
+      city: record.fields['City'] || '', 
+      state: record.fields['State'] || '', 
+      zipCode: record.fields['Zip Code'] || '', 
+      homeownerName: record.fields['Homeowner Name'] || '',  
+      billable: record.fields['Billable/Non Billable'] === 'Billable',  
+      repairChargeAmount: record.fields['Repair Charge Amount'] || '',  
+      billableReason: record.fields['Billable Reason'] || '',  
     }));
 
     console.log('Airtable events to process:', records.length);
 
     if (records.length === 0) {
-      console.log("No more events to process. Terminating script.");
+      console.log('No more events to process. Terminating script.');
+      isTerminated = true; 
       return [];
     }
 
@@ -462,77 +412,6 @@ async function fetchUnprocessedEventsFromAirtable() {
     return [];
   }
 }
-
-async function processEvents(events, session, calendarId) {
-  if (!session || !session.provider_token) {
-    console.error('Session or provider_token is missing. Cannot process events.');
-    return;
-  }
-
-  // Step 1: Fetch all current and future events from Google Calendar
-  const googleEvents = await fetchCurrentAndFutureGoogleCalendarEvents(calendarId, session);
-
-  for (const airtableEvent of events) {
-    // Step 2: Skip if the record is marked as processed or GoogleEventId is already present
-    if (airtableEvent.googleEventId || airtableEvent.processed) {
-      console.log(`Skipping event "${airtableEvent.title}" - GoogleEventId or Processed status already set.`);
-      continue;
-    }
-
-    try {
-      // Lock the Airtable record before updating it
-      await lockAirtableRecord(airtableEvent.id);
-
-      // Check if there's a duplicate or an existing event in Google Calendar
-      let googleEventId = await checkForDuplicateEvent(airtableEvent, calendarId, session);
-
-      if (googleEventId) {
-        const googleEvent = await getGoogleCalendarEvent(googleEventId, calendarId, session);
-
-        // Compare the event in Airtable and Google Calendar
-        if (isEventDifferent(airtableEvent, googleEvent)) {
-          console.log(`Updating event "${airtableEvent.title}" as it has changed.`);
-          await deleteGoogleCalendarEvent(googleEventId, calendarId, session);  // Delete the old event
-          googleEventId = await createGoogleCalendarEvent(airtableEvent, calendarId, session);  // Create a new one with updated details
-          await updateAirtableWithGoogleEventIdAndProcessed(airtableEvent.id, googleEventId, true);
-        } else {
-          console.log(`No changes detected for event "${airtableEvent.title}". Skipping.`);
-        }
-      } else {
-        // If no existing event or duplicate is found, create a new Google event
-        googleEventId = await createGoogleCalendarEvent(airtableEvent, calendarId, session);
-        if (googleEventId) {
-          await updateAirtableWithGoogleEventIdAndProcessed(airtableEvent.id, googleEventId, true);
-        }
-      }
-
-    } catch (error) {
-      console.error(`Error processing event "${airtableEvent.title}":`, error);
-    } finally {
-      // Increase the delay before unlocking
-      await sleep(12000);  // Wait for 6 seconds before unlocking
-      await unlockAirtableRecord(airtableEvent.id);
-    }
-  }
-}
-
-
-
-
-// Fetch and process events
-fetchUnprocessedEventsFromAirtable().then((eventsToProcess) => {
-  console.log("Airtable events to process:", eventsToProcess.length);
-
-  if (eventsToProcess.length === 0) {
-    console.log("No more events to process. Terminating script.");
-    return; // Terminate the script here if no events
-  }
-
-  // Proceed with processing the events
-  processEvents(eventsToProcess);
-});
-
-
 
 function clearAllTimers() {
   const highestTimeoutId = setTimeout(() => {}, 0);
@@ -596,11 +475,9 @@ async function checkForDuplicateEvent(event, calendarId, session, offsetMinutes 
 }
 
 
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
 
 async function populateGoogleCalendarWithAirtableRecords(
   calendarId,
@@ -686,31 +563,14 @@ async function populateGoogleCalendarWithAirtableRecords(
   console.log(`Total number of events created: ${createdEventsCount}`);
   console.log(`Total number of records processed for calendar "${calendarName}": ${processedRecordIds.size}`);
 }
-const normalizeDate = (dateString) => new Date(dateString).toISOString();
 
-const isEventDifferent = (airtableEvent, googleEvent) => {
-  const normalizeDate = (dateString) => new Date(dateString).toISOString();
+function isEventDifferent(airtableEvent, googleEvent) {
+  // Compare key fields: title, start, end, description, location
+  const isStartDifferent = new Date(airtableEvent.start).getTime() !== new Date(googleEvent.start.dateTime).getTime();
+  const isEndDifferent = new Date(airtableEvent.end).getTime() !== new Date(googleEvent.end.dateTime).getTime();
 
-  // Declare and initialize airtableStart and googleStart
-  const airtableStart = normalizeDate(airtableEvent.start);
-  const googleStart = normalizeDate(googleEvent.start.dateTime || googleEvent.start.date);
-
-  const airtableEnd = normalizeDate(airtableEvent.end);
-  const googleEnd = normalizeDate(googleEvent.end.dateTime || googleEvent.end.date);
-
-  // Log the values here
-  console.log("Airtable Start:", airtableStart);
-  console.log("Google Calendar Start:", googleStart);
-
-  // Return true if the start or end times differ
-  return airtableStart !== googleStart || airtableEnd !== googleEnd;
-};
-
-
-
-
-
-
+  return  isStartDifferent || isEndDifferent ;
+}
 
 async function getGoogleCalendarEvent(eventId, calendarId, session) {
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
@@ -737,126 +597,53 @@ async function getGoogleCalendarEvent(eventId, calendarId, session) {
   }
 }
 
-async function updateGoogleCalendarEvent(eventId, airtableEvent, session, calendarId, calendarName) {
-  console.log(`Updating event in calendar "${calendarName}" (ID: ${calendarId})`);
+async function compareAndSyncEvents(airtableEvents, googleEvents, session, calendarId, calendarName) {
+  for (const airtableEvent of airtableEvents) {
+    const googleEvent = googleEvents.find((event) => event.id === airtableEvent.googleEventId);
 
-  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
+    if (googleEvent) {
+      // Compare the events' details
+      if (isEventDifferent(airtableEvent, googleEvent)) {
+        console.log(`Event "${airtableEvent.title}" has changed. Updating Google Calendar "${calendarName}"...`);
 
-  const updatedEvent = {
-    summary: airtableEvent.title,
-    description: airtableEvent.description,
-    start: { dateTime: airtableEvent.start.toISOString() },
-    end: { dateTime: airtableEvent.end.toISOString() },
-    location: airtableEvent.location,
-  };
 
-  try {
+        } else {
+          console.error(`Failed to update event "${airtableEvent.title}" in Google Calendar "${calendarName}".`);
+        }
+      }
+    }
+  }
+
+async function fetchCurrentAndFutureGoogleCalendarEvents(calendarId, session) {
+  let allEvents = [];
+  let nextPageToken = null;
+  
+  const now = new Date().toISOString(); // Get the current date and time
+
+  do {
+    const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${now}&maxResults=2500${nextPageToken ? `&pageToken=${nextPageToken}` : ''}`;
+
     const response = await fetch(url, {
-      method: 'PUT', // Use PUT to update an event
       headers: {
         Authorization: `Bearer ${session.provider_token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(updatedEvent),
     });
 
-    const data = await response.json();
-    if (response.ok) {
-      console.log(`Event "${airtableEvent.title}" updated successfully in calendar "${calendarName}"`);
-    } else {
-      console.error(`Failed to update event "${airtableEvent.title}" in calendar "${calendarName}":`, data);
-    }
-
-    return response.ok;
-  } catch (error) {
-    console.error(`Error updating event "${airtableEvent.title}" in calendar "${calendarName}":`, error);
-    return false;
-  }
-}
-
-
-
-async function fetchCurrentAndFutureGoogleCalendarEvents(calendarId, session) {
-  if (!session || !session.provider_token) {
-    throw new Error('Session or provider token is missing');
-  }
-
-  try {
-    const response = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${new Date().toISOString()}&maxResults=2500`,
-      {
-        headers: {
-          Authorization: `Bearer ${session.provider_token}`, // Ensure you're sending the OAuth token
-        },
-      }
-    );
-
-    if (response.status === 401) {
-      console.error('Unauthorized. Token may have expired.');
-      await handleReauthentication(); // Trigger reauthentication
+    if (!response.ok) {
+      const data = await response.json();
+      console.error('Error fetching Google Calendar events:', data);
       return [];
     }
 
     const data = await response.json();
-    // Return an empty array if there are no events, otherwise return the events array
-    return data.items || [];
-  } catch (error) {
-    console.error('Error fetching Google Calendar events:', error);
-    return [];
-  }
+    allEvents = allEvents.concat(data.items);
+    nextPageToken = data.nextPageToken;
+
+  } while (nextPageToken);
+
+  return allEvents;
 }
-
-
-
-async function handleReauthentication() {
-  // Get the current session from Supabase
-  const { data: { session }, error } = await supabase.auth.getSession();
-  
-  if (error) {
-    console.error('Error getting session:', error);
-    return;
-  }
-
-  if (!session) {
-    console.log('No active session found. Reauthenticating...');
-    await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        scopes: 'https://www.googleapis.com/auth/calendar',
-        redirectTo: window.location.origin,
-      },
-    });
-    return;
-  }
-
-  // Check if the current token is expired
-  const tokenExpirationTime = session.expires_at * 1000; // Convert seconds to milliseconds
-  const currentTime = new Date().getTime();
-
-  if (tokenExpirationTime < currentTime) {
-    console.log('Access token expired. Attempting to refresh...');
-
-    // Supabase doesn't handle token refresh automatically, so we need to reauthenticate
-    const { data: newSession, error: refreshError } = await supabase.auth.refreshSession();
-    
-    if (refreshError) {
-      console.error('Failed to refresh session, reauthenticating user:', refreshError);
-      await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          scopes: 'https://www.googleapis.com/auth/calendar',
-          redirectTo: window.location.origin,
-        },
-      });
-    } else {
-      console.log('Token successfully refreshed.');
-    }
-  } else {
-    console.log('Token is still valid.');
-  }
-}
-
-
 
 async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
@@ -882,6 +669,33 @@ async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
     return false;
   }
 }
+
+async function checkIfAllRecordsProcessed() {
+  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=NOT({Processed})&pageSize=100`;
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+    if (data.records.length === 0) {
+      console.log('All records have been processed.');
+      return true; // All records are processed
+    } else {
+      console.log(`${data.records.length} records are still unprocessed.`);
+      return false;  // There are still unprocessed records
+    }
+  } catch (error) {
+    console.error('Error checking unprocessed records:', error);
+    return false;  // In case of an error, assume not all records are processed
+  }
+}
+
+
 
 
 
@@ -911,71 +725,73 @@ function CalendarSection({
       // Exit if all records are processed
       if (allRecordsProcessed) {
         console.log('All records have been processed. Skipping further sync attempts.');
-        return; 
-        terminateScript();
-
+        terminateScript(); // Terminate the script before returning
+        return;  // Exit the function after terminating
       }
-
+  
       // Exit if outside sync time range
       if (!isWithinTimeRange()) {
         console.log("Syncing is allowed only between 6:45 AM and 10:00 PM. Current time is outside this range.");
         return;
       }
-
+  
       console.log('Attempting to sync events...');
+  
       if (session && triggerSync) {
         setProgress(0);
+  
         if (!session.provider_token) {
           console.error('No valid session token found. Logging out.');
           signOut();
           return;
         }
-
-        // Sync the events with Google Calendar
-        await populateGoogleCalendarWithAirtableRecords(
-          calendarId,
-          calendarName,
-          session,
-          setAddedRecords,
-          setFailedRecords,
-          setNoChangeRecords,
-          setAllRecordsProcessed
-        )
-        .then(async () => {
+  
+        try {
+          // Sync the events with Google Calendar
+          await populateGoogleCalendarWithAirtableRecords(
+            calendarId,
+            calendarName,
+            session,
+            setAddedRecords,
+            setFailedRecords,
+            setNoChangeRecords,
+            setAllRecordsProcessed
+          );
+  
           console.log(`Finished syncing events to Google Calendar "${calendarName}"`);
-
+  
           // After syncing, check for duplicates
-          await removeDuplicateEvents(); 
+          await removeDuplicateEvents();
+  
+          // Set the last sync time and other status updates
           setLastSyncTime(new Date());
           setTriggerSync(false);
           setManualSyncComplete(true);  // Mark manual sync as complete
-        })
-        .catch((error) => {
+  
+        } catch (error) {
           console.error(`Error syncing Airtable to Google Calendar "${calendarName}":`, error);
-        });
+        }
       }
     };
-
+  
     // Only proceed if manual sync is triggered
     if (triggerSync) {
       console.log(`Manual sync triggered for calendar: ${calendarName}`);
-      syncEvents();
+      syncEvents(); // Call the async syncEvents function
     }
-
+  
   }, [
-    session,
+    session, // React hook dependencies
     signOut,
     calendarId,
     calendarName,
     setAddedRecords,
     setFailedRecords,
-    setRateLimitInfo,
-    triggerSync,
-    setTriggerSync,
-    setRateLimitHit,
     setNoChangeRecords,
-    setChangedRecords,
-    allRecordsProcessed, // Add the processed state dependency
+    setAllRecordsProcessed,
+    triggerSync, // Trigger sync when this changes
+    setTriggerSync,
+    allRecordsProcessed, // Terminate if all records are processed
   ]);
 
   // After syncing Google Calendar
@@ -1033,43 +849,6 @@ async function removeDuplicateEvents() {
   }
 }
 
-async function fetchAirtableEventsWithFutureStartDates() {
-  const today = new Date().toISOString().split('T')[0];
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=AND(IS_AFTER({StartDate}, '${today}'))&pageSize=100`;
-
-  try {
-    const response = await fetch(url, {
-      headers: {
-        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-        'Content-Type': 'application/json',
-      },
-    });
-
-    const data = await response.json();
-    return data.records.map(record => ({
-      id: record.id,
-      title: record.fields['Calendar Event Name'] || 'Untitled Event',
-      start: new Date(record.fields['StartDate']),
-      end: new Date(record.fields['EndDate']),
-      googleEventId: record.fields['GoogleEventId'] || null,
-      processed: record.fields['Processed'] || false,
-    }));
-  } catch (error) {
-    console.error('Error fetching Airtable events with future start dates:', error);
-    return [];
-  }
-}
-
-
-
-
-
-let syncInProgress = false; // Declare globally in the component
-
-const FIFTEEN_MINUTES = 15 * 60 * 1000;  // 15 minutes in milliseconds
-const ONE_SECOND = 1000;
-
-
 function App() {
   const session = useSession();  // Access the session from Supabase hook
   const supabase = useSupabaseClient();
@@ -1080,55 +859,22 @@ function App() {
   const [noChangeRecords, setNoChangeRecords] = useState([]); 
   const [changedRecords, setChangedRecords] = useState([]); 
   const [triggerSync, setTriggerSync] = useState(false);
-  const [percentage, setPercentage] = useState(0); 
   const [allRecordsProcessed, setAllRecordsProcessed] = useState(false); 
-  const [timeLeft, setTimeLeft] = useState(FIFTEEN_MINUTES / ONE_SECOND); // Countdown state
-
 
   const calendarInfo = [
     { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
   ].sort((a, b) => a.name.localeCompare(b.name));
 
-  const handleSyncNow = () => {
+  const handleSyncNow = async () => {
     console.log('Manual sync button clicked.');
-    setTriggerSync(true); 
-  };
-
-  // Calculate time to the next quarter-hour mark
-  const calculateTimeToNextQuarter = () => {
-    const now = new Date();
-    const currentMinutes = now.getMinutes();
-    const minutesToNextQuarter = 15 - (currentMinutes % 15); // Minutes remaining to the next quarter-hour
-    const nextQuarter = new Date(now.getTime() + minutesToNextQuarter * 60 * 1000);
-
-    // Set the seconds remaining until the next quarter-hour
-    const timeDifference = Math.floor((nextQuarter.getTime() - now.getTime()) / ONE_SECOND); 
-    return timeDifference;
-  };
-
-  // Countdown timer logic - initializes timeLeft on first render
-  useEffect(() => {
-    setTimeLeft(calculateTimeToNextQuarter()); // Initial time set to the next quarter-hour mark
-  }, []); // Empty array means this runs only on component mount
-
-  // Countdown logic - updates timeLeft every second
-  useEffect(() => {
-    if (timeLeft > 0) {
-      const countdownInterval = setInterval(() => {
-        setTimeLeft((prevTimeLeft) => prevTimeLeft - 1);
-      }, ONE_SECOND);
-
-      return () => clearInterval(countdownInterval); // Clear interval on unmount
-    } else {
-      manualSync(); // Trigger the sync when the timer reaches 0
-      setTimeLeft(calculateTimeToNextQuarter()); // Reset to the next quarter-hour
-    }
-  }, [timeLeft]); // Depend on timeLeft to update every second
-
-  const formatTime = (seconds) => {
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = seconds % 60;
-    return `${minutes}:${remainingSeconds < 10 ? '0' : ''}${remainingSeconds}`;
+    
+    // Get unprocessed events from Airtable
+    const events = await fetchUnprocessedEventsFromAirtable();
+    
+    // Call processEvents and pass session as a parameter
+    await processEvents(events, 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', session);  // Replace 'your_calendar_id' with your actual Google Calendar ID
+    
+    setTriggerSync(true);
   };
   
 
@@ -1148,174 +894,60 @@ function App() {
     }
   };
 
+  // Logout handler
   const handleLogout = async () => {
-    const { data: { session } } = await supabase.auth.getSession(); // Check for active session
     if (!session) {
       console.error('No active session found. The user may already be logged out.');
-      forceLogout(); // Clear the local session forcibly
       return;
     }
-  
+
     try {
       const { error } = await supabase.auth.signOut();
       if (error) {
         console.error('Logout failed:', error.message);
       } else {
         console.log('User logged out successfully.');
-        // Optionally clear local state or redirect the user
       }
     } catch (err) {
       console.error('Unexpected error during logout:', err);
     }
   };
 
-  
-
-
-  
-  
-  useEffect(() => {
-    const checkSession = async () => {
-      try {
-        const { data: { session } } = await supabase.auth.getSession(); // Check if session exists
-        if (!session) {
-          console.log('Session expired. Redirecting to login...');
-          forceLogout(); // Clear session and redirect
-        } else {
-          console.log('Session is active.');
-        }
-      } catch (error) {
-        console.error('Error checking session:', error);
-      }
-    };
-  
-    // Call the checkSession function immediately and set an interval for periodic checks
-    checkSession();
-    const sessionInterval = setInterval(checkSession, 90000); // Check session every 30 seconds
-  
-    // Clear the interval when component unmounts
-    return () => clearInterval(sessionInterval);
-  }, [session]); // Ensure the effect depends on the session
-  
-  
-
-  const forceLogout = () => {
-    console.log('Forcing logout by clearing local storage...');
-    supabase.auth.setAuth(null); // Clear the auth session forcibly
-    localStorage.clear(); // Clear local storage if needed
-    // Optionally redirect the user to the login page
-    window.location.href = '/login'; // Redirect to login
-  };
-  
-
-  async function compareAndSyncEvents(airtableEvents, googleEvents, session, calendarId, calendarName) {
-    // Ensure googleEvents is an array
-    if (!Array.isArray(googleEvents)) {
-      console.error('googleEvents is not an array:', googleEvents);
-      return;
-    }
-  
-    for (const airtableEvent of airtableEvents) {
-      const googleEvent = googleEvents.find(event => event.id === airtableEvent.googleEventId);
-  
-      if (googleEvent) {
-        // Compare the events' details
-        if (isEventDifferent(airtableEvent, googleEvent)) {
-          console.log(`Event "${airtableEvent.title}" has changed. Deleting Google Calendar event and updating Airtable...`);
-  
-          // Delete the Google Calendar event
-          const isDeleted = await deleteGoogleCalendarEvent(googleEvent.id, calendarId, session);
-  
-          if (isDeleted) {
-            // Update the Airtable record: remove GoogleEventId and uncheck Processed
-            await updateAirtableWithGoogleEventIdAndProcessed(airtableEvent.id, null, false);  // Mark as unprocessed
-            console.log(`Airtable record "${airtableEvent.title}" marked as unprocessed.`);
-          }
-        } else {
-          console.log(`Event "${airtableEvent.title}" is up-to-date. No action needed.`);
-        }
-      } else if (!airtableEvent.googleEventId) {
-        // Handle case where the GoogleEventId is missing
-        console.log(`No matching Google Calendar event found for "${airtableEvent.title}". A new event will be created.`);
-      }
-    }
-  }
-  
   useEffect(() => {
     const initializePage = async () => {
-      console.log('Initializing page...');
-  
-      if (!session || !session.provider_token) {
-        console.error('Session or provider token is not available.');
-        return;
-      }
-  
-      // Step 1: Update Calendar Link for Savannah branch
-      await updateCalendarLinkForSavannah(); // Update the Calendar Link field for Savannah
-  
-      // Fetch Airtable events with future start dates
-      const airtableEvents = await fetchAirtableEventsWithFutureStartDates();
-  
-      if (airtableEvents.length === 0) {
-        console.log('No more future events to process.');
-        return;
-      }
-  
-      // Fetch current and future Google Calendar events
-      const googleEvents = await fetchCurrentAndFutureGoogleCalendarEvents(calendarInfo[0].id, session);
-  
-      // Step 2: Compare and sync events between Airtable and Google Calendar
-      await compareAndSyncEvents(airtableEvents, googleEvents, session, calendarInfo[0].id, calendarInfo[0].name);
-  
-      // Step 3: Check if the Airtable event dates (start and end times) have changed
-      for (const airtableEvent of airtableEvents) {
-        const googleEvent = googleEvents.find(event => event.id === airtableEvent.googleEventId);
-  
-        if (googleEvent) {
-          if (isEventDifferent(airtableEvent, googleEvent)) {
-            console.log(`Event "${airtableEvent.title}" start or end dates have changed. Updating event...`);
-  
-            // Delete the old Google Calendar event
-            const isDeleted = await deleteGoogleCalendarEvent(googleEvent.id, calendarInfo[0].id, session);
-            
-            if (isDeleted) {
-              // Remove GoogleEventId and uncheck 'Processed' in Airtable to re-sync
-              await updateAirtableWithGoogleEventIdAndProcessed(airtableEvent.id, null, false);
-              console.log(`Successfully updated Airtable event "${airtableEvent.title}".`);
-            }
-          } else {
-            console.log(`Event "${airtableEvent.title}" is unchanged.`);
-          }
+        console.log('Initializing page...');
+
+        if (!session || !session.provider_token) {
+            console.error('Session or provider token is not available. User may not be logged in.');
+            return;
         }
-      }
-  
-      // Step 4: Delete duplicate Google Calendar events
-      await deleteDuplicateGoogleCalendarEvents(calendarInfo[0].id, session);
+
+        const airtableEvents = await fetchUnprocessedEventsFromAirtable(); 
+
+        if (airtableEvents.length === 0) {
+            console.log('No more events to process. Terminating script.');
+            return;
+        }
+
+        const googleEvents = await fetchCurrentAndFutureGoogleCalendarEvents(
+            'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
+            session
+        );
+
+        await compareAndSyncEvents(airtableEvents, googleEvents, session);
+
+
+        await deleteDuplicateGoogleCalendarEvents(
+            'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
+            session
+        );
     };
-  
+
     if (session) {
-      initializePage();
+        initializePage();
     }
   }, [session]);
-  
-  function isEventDifferent(airtableEvent, googleEvent) {
-    const normalizeDate = (dateString) => new Date(dateString).toISOString();
-  
-    // Declare and initialize airtableStart and googleStart
-    const airtableStart = normalizeDate(airtableEvent.start);
-    const googleStart = normalizeDate(googleEvent.start.dateTime || googleEvent.start.date);
-  
-    const airtableEnd = normalizeDate(airtableEvent.end);
-    const googleEnd = normalizeDate(googleEvent.end.dateTime || googleEvent.end.date);
-  
-    // Return true if the start or end times differ
-    return airtableStart !== googleStart || airtableEnd !== googleEnd;
-  }
-  
-  
-  
-  
-  
+
   let isSyncing = false;
 
   async function manualSync() {
@@ -1336,43 +968,39 @@ function App() {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  // Ensure that your sync function keeps processing events properly and doesn't terminate prematurely
-let syncInProgress = false;
+  let syncInProgress = false;
 
-async function fetchAndProcessEvents() {
-  if (syncInProgress) {
-      console.log("Sync is already in progress, skipping new request.");
-      return;
-  }
+  async function fetchAndProcessEvents() {
+    if (syncInProgress) {
+        console.log("Sync is already in progress, skipping new request.");
+        return;
+    }
 
-  syncInProgress = true;
+    syncInProgress = true;
 
-  try {
-      let events = await fetchUnprocessedEventsFromAirtable();
+    try {
+        let events = await fetchUnprocessedEventsFromAirtable();
 
-      // Process events in batches
-      while (events.length > 0) {
-          console.log(`Processing ${events.length} events...`);  // Log the number of events
-          
-          // Process each batch of events
-          await processEvents(events);
+        while (events.length > 0) {
+            console.log(`Processing ${events.length} events...`);
+            await processEvents(events);
 
-          // Fetch any remaining unprocessed events (refresh)
-          events = await fetchUnprocessedEventsFromAirtable();
+            events = await fetchUnprocessedEventsFromAirtable();
+            await sleep(5000);
+        }
 
-          // Wait a bit before the next fetch to avoid rate limiting
-          await sleep(5000); // Adjust delay as needed
+        console.log("No more events to process. Terminating sync.");
+
+        if (events.length === 0) {
+          console.log("All events processed, updating UI...");
+          setAllRecordsProcessed(true);
       }
 
-      console.log("No more events to process. All events processed.");
-      setAllRecordsProcessed(true); // Mark all records as processed
-
-  } catch (error) {
-      console.error("Error while processing events:", error);
-  } finally {
-      syncInProgress = false;  // Allow another sync to start
+    } catch (error) {
+        console.error("Error while processing events:", error);
+        syncInProgress = false; 
+    }
   }
-}
 
   useEffect(() => {
     console.log('Session details at API call:', session);
@@ -1383,26 +1011,7 @@ async function fetchAndProcessEvents() {
     }
   }, [session]);
 
-
-
-  const getGreeting = () => {
-    if (!session || !session.user) {
-      return 'Hello, Guest';
-    }
-
-    const currentHour = new Date().getHours();
-    let name = session.user.email.split('@')[0];
-    name = name.replace(/\./g, ' ').split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
-
-    if (currentHour < 12) {
-      return `Good morning, ${name}`;
-    } else if (currentHour < 18) {
-      return `Good afternoon, ${name}`;
-    } else {
-      return `Good evening, ${name}`;
-    }
-    
-  };
+   
 
   if (isLoading) {
     return <div>Loading...</div>;
@@ -1411,12 +1020,11 @@ async function fetchAndProcessEvents() {
   return (
     <div className="App">
       <div className="container">
-        <h2>{getGreeting()}</h2> 
+      
         <h3 style={{ fontSize: '16px', textAlign: 'center' }}>Manual Sync Only</h3>
-        <p>Next sync in: {formatTime(timeLeft)}</p> {/* Display the countdown timer */}
 
         {!session ? (
-          <button onClick={handleLogin}>Sign In with Google</button>
+          <button onClick={handleLogin}>Sign In with Google</button> 
         ) : (
           <button onClick={handleLogout}>Logout</button>
         )}
@@ -1425,24 +1033,24 @@ async function fetchAndProcessEvents() {
           <div style={{ width: '100%', margin: '0 auto' }}>
             <>
               <hr />
-              <button onClick={handleSyncNow}>Sync Now</button>
+              <button onClick={handleSyncNow}>Sync Now</button> 
               <div className="calendar-grid">
                 {calendarInfo.map((calendar) => (
-                  <CalendarSection
-                    key={calendar.id}
-                    calendarId={calendar.id}
-                    calendarName={calendar.name}
-                    session={session}
-                    signOut={handleLogout}
-                    setAddedRecords={setAddedRecords}
-                    setFailedRecords={setFailedRecords}
-                    setNoChangeRecords={setNoChangeRecords}
-                    setChangedRecords={setChangedRecords}
-                    triggerSync={triggerSync}
-                    setTriggerSync={setTriggerSync}
-                    allRecordsProcessed={allRecordsProcessed}
-                    setAllRecordsProcessed={setAllRecordsProcessed}
-                  />
+                <CalendarSection
+                  key={calendar.id}
+                  calendarId={calendar.id}
+                  calendarName={calendar.name}
+                  session={session}
+                  signOut={handleLogout}
+                  setAddedRecords={setAddedRecords}
+                  setFailedRecords={setFailedRecords}
+                  setNoChangeRecords={setNoChangeRecords}
+                  setChangedRecords={setChangedRecords}
+                  triggerSync={triggerSync}
+                  setTriggerSync={setTriggerSync}
+                  allRecordsProcessed={allRecordsProcessed}
+                  setAllRecordsProcessed={setAllRecordsProcessed}
+                />
                 ))}
               </div>
 
@@ -1504,6 +1112,7 @@ async function fetchAndProcessEvents() {
               </div>
 
               <button id="manualSyncButton" onClick={manualSync}>Sync Now</button>
+
               <button onClick={handleSyncNow} disabled={triggerSync}>Sync Now</button>
             </>
           </div>
