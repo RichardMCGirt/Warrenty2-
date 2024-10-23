@@ -47,6 +47,113 @@ async function processEvents(events, calendarId, session) {
   }
 }
 
+async function syncGoogleCalendarWithAirtable(calendarId, session) {
+  console.log('Synchronizing Google Calendar with Airtable...');
+
+  // Fetch all events from Google Calendar
+  const googleEvents = await fetchAllGoogleCalendarEvents(calendarId, session);
+  if (!googleEvents || googleEvents.length === 0) {
+    console.log('No events found in Google Calendar.');
+    return;
+  }
+
+  // Fetch all records from Airtable, including processed ones
+  const airtableEvents = await fetchAllAirtableEvents();
+
+  const processedEvents = [];
+
+  for (const airtableEvent of airtableEvents) {
+    const googleEvent = googleEvents.find(event => event.id === airtableEvent.googleEventId);
+
+    if (googleEvent) {
+      // Compare Google Calendar event with Airtable record
+      if (isEventDifferent(airtableEvent, googleEvent)) {
+        console.log(`Differences found in event "${airtableEvent.title}". Deleting Google Calendar event and marking Airtable as unprocessed.`);
+
+        // Delete the Google Calendar event
+        await deleteGoogleCalendarEvent(googleEvent.id, calendarId, session);
+
+        // Mark the Airtable record as unprocessed and remove GoogleEventId
+        await markAirtableRecordAsUnprocessed(airtableEvent.id);
+      } else {
+        processedEvents.push(airtableEvent.id);
+      }
+    } else if (airtableEvent.googleEventId) {
+      // The event exists in Airtable but not in Google Calendar, mark it as unprocessed
+      console.log(`Google Calendar event not found for Airtable record "${airtableEvent.title}". Marking as unprocessed.`);
+      await markAirtableRecordAsUnprocessed(airtableEvent.id);
+    }
+  }
+
+  console.log(`Google Calendar and Airtable synchronization completed. ${processedEvents.length} records are in sync.`);
+}
+
+// Fetch all Airtable records, including processed ones
+async function fetchAllAirtableEvents() {
+  console.log('Fetching all Airtable events...');
+  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?fields[]=GoogleEventId&fields[]=Calendar Event Name&fields[]=StartDate&fields[]=EndDate&fields[]=Street Address&fields[]=City&fields[]=State&fields[]=Zip Code&fields[]=Homeowner Name&fields[]=Processed`;
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+
+    return data.records.map(record => ({
+      id: record.id,
+      title: record.fields['Calendar Event Name'] || 'Untitled Event',
+      start: new Date(record.fields['StartDate']),
+      end: new Date(record.fields['EndDate']),
+      googleEventId: record.fields['GoogleEventId'],
+      processed: record.fields['Processed'] || false,
+      streetAddress: record.fields['Street Address'] || '',
+      city: record.fields['City'] || '',
+      state: record.fields['State'] || '',
+      zipCode: record.fields['Zip Code'] || '',
+      homeownerName: record.fields['Homeowner Name'] || '',
+    }));
+  } catch (error) {
+    console.error('Error fetching Airtable events:', error);
+    return [];
+  }
+}
+
+// Mark Airtable record as unprocessed
+async function markAirtableRecordAsUnprocessed(airtableRecordId) {
+  console.log(`Marking Airtable record ${airtableRecordId} as unprocessed and removing GoogleEventId...`);
+
+  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${airtableRecordId}`;
+  const updateData = {
+    fields: {
+      GoogleEventId: null,
+      Processed: false,
+    },
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(updateData),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('Error updating Airtable record:', data.error);
+    } else {
+      console.log('Airtable record successfully marked as unprocessed:', data);
+    }
+  } catch (error) {
+    console.error('Error updating Airtable record:', error);
+  }
+}
 
 
 async function deleteDuplicateGoogleCalendarEvents(calendarId, session) {
@@ -915,39 +1022,38 @@ function App() {
 
   useEffect(() => {
     const initializePage = async () => {
-        console.log('Initializing page...');
-
-        if (!session || !session.provider_token) {
-            console.error('Session or provider token is not available. User may not be logged in.');
-            return;
-        }
-
-        const airtableEvents = await fetchUnprocessedEventsFromAirtable(); 
-
-        if (airtableEvents.length === 0) {
-            console.log('No more events to process. Terminating script.');
-            return;
-        }
-
-        const googleEvents = await fetchCurrentAndFutureGoogleCalendarEvents(
-            'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-            session
-        );
-
-        await compareAndSyncEvents(airtableEvents, googleEvents, session);
-
-
-        await deleteDuplicateGoogleCalendarEvents(
-            'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-            session
-        );
+      console.log('Initializing page...');
+  
+      if (!session || !session.provider_token) {
+        console.error('Session or provider token is not available. User may not be logged in.');
+        return;
+      }
+  
+      // Step 1: Sync Google Calendar with Airtable (compare and clean up)
+      await syncGoogleCalendarWithAirtable('c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', session);
+  
+      // Step 2: Continue with fetching and processing unprocessed events
+      const airtableEvents = await fetchUnprocessedEventsFromAirtable();
+  
+      if (airtableEvents.length === 0) {
+        console.log('No more events to process. Terminating script.');
+        return;
+      }
+  
+      const googleEvents = await fetchCurrentAndFutureGoogleCalendarEvents(
+        'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
+        session
+      );
+  
+      await compareAndSyncEvents(airtableEvents, googleEvents, session);
+      await deleteDuplicateGoogleCalendarEvents('c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', session);
     };
-
+  
     if (session) {
-        initializePage();
+      initializePage();
     }
   }, [session]);
-
+  
   let isSyncing = false;
 
   async function manualSync() {
