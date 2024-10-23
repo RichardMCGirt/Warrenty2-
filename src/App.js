@@ -777,35 +777,6 @@ async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
   }
 }
 
-async function checkIfAllRecordsProcessed() {
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=NOT({Processed})&pageSize=100`;
-
-  try {
-    const response = await fetch(url, {
-      headers: {
-        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-        'Content-Type': 'application/json',
-      },
-    });
-
-    const data = await response.json();
-    if (data.records.length === 0) {
-      console.log('All records have been processed.');
-      return true; // All records are processed
-    } else {
-      console.log(`${data.records.length} records are still unprocessed.`);
-      return false;  // There are still unprocessed records
-    }
-  } catch (error) {
-    console.error('Error checking unprocessed records:', error);
-    return false;  // In case of an error, assume not all records are processed
-  }
-}
-
-
-
-
-
 function CalendarSection({
   calendarId,
   calendarName,
@@ -826,6 +797,8 @@ function CalendarSection({
   const [lastSyncTime, setLastSyncTime] = useState(null);
   const [progress, setProgress] = useState(0);
   const [manualSyncComplete, setManualSyncComplete] = useState(false); // Track manual sync completion
+
+  
 
   useEffect(() => {
     const syncEvents = async () => {
@@ -960,6 +933,7 @@ function App() {
   const session = useSession();  // Access the session from Supabase hook
   const supabase = useSupabaseClient();
   const { isLoading } = useSessionContext();
+  const [nextSyncTime, setNextSyncTime] = useState(null);
 
   const [addedRecords, setAddedRecords] = useState([]);
   const [failedRecords, setFailedRecords] = useState([]);
@@ -968,12 +942,61 @@ function App() {
   const [triggerSync, setTriggerSync] = useState(false);
   const [allRecordsProcessed, setAllRecordsProcessed] = useState(false); 
 
+   // Refactor the token refresh logic and move it inside the App component
+   useEffect(() => {
+    if (session) {
+      const refreshTokenBeforeExpiration = () => {
+        const expiresAt = session.expires_at; // Token expiration timestamp
+        const currentTime = Math.floor(Date.now() / 1000); // Current timestamp in seconds
+        const timeUntilExpiry = expiresAt - currentTime;
+
+        if (timeUntilExpiry <= 300) { // Refresh token 5 minutes before it expires
+          refreshSession(); // Call manual refresh
+        }
+      };
+
+      // Check every minute if the token is about to expire
+      const interval = setInterval(refreshTokenBeforeExpiration, 60 * 1000);
+
+      return () => clearInterval(interval); // Clean up on component unmount
+    }
+  }, [session]);
+
+  const refreshSession = async () => {
+    const { error } = await supabase.auth.refreshSession();  // Use the Supabase client
+
+    if (error) {
+      console.error('Error refreshing session:', error.message);
+    } else {
+      console.log('Session successfully refreshed');
+    }
+  };
+
+
+
+  // Helper function to calculate the time remaining until the next quarter hour
+  const getMillisecondsUntilNextQuarterHour = () => {
+    const now = new Date();
+    const minutes = now.getMinutes();
+    const nextQuarterMinutes = Math.ceil(minutes / 15) * 15; // Calculate the next quarter hour
+    const nextSyncTime = new Date(now);
+    nextSyncTime.setMinutes(nextQuarterMinutes, 0, 0); // Set to next quarter hour
+    if (nextQuarterMinutes === 60) {
+      nextSyncTime.setHours(now.getHours() + 1, 0, 0, 0); // Handle the case for 00:00
+    }
+    return nextSyncTime.getTime() - now.getTime(); // Return milliseconds until the next quarter-hour
+  };
+
+
+
   const calendarInfo = [
     { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
   ].sort((a, b) => a.name.localeCompare(b.name));
 
   const handleSyncNow = async () => {
     console.log('Manual sync button clicked.');
+    console.log(`Syncing at ${new Date().toLocaleTimeString()}`);
+
     
     // Get unprocessed events from Airtable
     const events = await fetchUnprocessedEventsFromAirtable();
@@ -984,6 +1007,26 @@ function App() {
     setTriggerSync(true);
   };
   
+// Schedule sync to run at every quarter-hour
+const scheduleNextSync = () => {
+  const delay = getMillisecondsUntilNextQuarterHour();
+  const nextSyncTimeValue = new Date(Date.now() + delay); // Calculate the next sync time
+
+  // Update the state with the next sync time
+  setNextSyncTime(nextSyncTimeValue);
+
+  console.log(`Next sync scheduled for ${nextSyncTimeValue.toLocaleTimeString()}`);
+
+  // Set a timeout to sync at the next quarter-hour
+  setTimeout(() => {
+    handleSyncNow(); // Run sync once the quarter-hour is reached
+
+    // After the initial sync, continue syncing every 15 minutes
+    setInterval(handleSyncNow, 15 * 60 * 1000); // Sync every 15 minutes
+  }, delay);
+};
+
+
 
   // Login handler
   const handleLogin = async () => {
@@ -1000,6 +1043,10 @@ function App() {
       console.error('Error during login:', loginError);
     }
   };
+// This is where the scheduling starts when the component is mounted
+useEffect(() => {
+  scheduleNextSync(); // Start the scheduling on component mount
+}, []); // Empty dependency array ensures this runs only once after component mount
 
   // Logout handler
   const handleLogout = async () => {
@@ -1126,37 +1173,41 @@ function App() {
   return (
     <div className="App">
       <div className="container">
-      
-        <h3 style={{ fontSize: '16px', textAlign: 'center' }}>Manual Sync Only</h3>
-
+        <h3>Automatic Sync at Each Quarter Hour</h3>
+  
+        {/* Display the next sync time */}
+        {nextSyncTime && (
+          <p>Next sync scheduled for {nextSyncTime.toLocaleTimeString()}</p>
+        )}
+  
         {!session ? (
-          <button onClick={handleLogin}>Sign In with Google</button> 
+          <button onClick={handleLogin}>Sign In with Google</button>
         ) : (
           <button onClick={handleLogout}>Logout</button>
         )}
-
+  
         {session && (
           <div style={{ width: '100%', margin: '0 auto' }}>
             <>
               <hr />
-              <button onClick={handleSyncNow}>Sync Now</button> 
+              <button onClick={handleSyncNow}>Sync Now</button>
               <div className="calendar-grid">
                 {calendarInfo.map((calendar) => (
-                <CalendarSection
-                  key={calendar.id}
-                  calendarId={calendar.id}
-                  calendarName={calendar.name}
-                  session={session}
-                  signOut={handleLogout}
-                  setAddedRecords={setAddedRecords}
-                  setFailedRecords={setFailedRecords}
-                  setNoChangeRecords={setNoChangeRecords}
-                  setChangedRecords={setChangedRecords}
-                  triggerSync={triggerSync}
-                  setTriggerSync={setTriggerSync}
-                  allRecordsProcessed={allRecordsProcessed}
-                  setAllRecordsProcessed={setAllRecordsProcessed}
-                />
+                  <CalendarSection
+                    key={calendar.id}
+                    calendarId={calendar.id}
+                    calendarName={calendar.name}
+                    session={session}
+                    signOut={handleLogout}
+                    setAddedRecords={setAddedRecords}
+                    setFailedRecords={setFailedRecords}
+                    setNoChangeRecords={setNoChangeRecords}
+                    setChangedRecords={setChangedRecords}
+                    triggerSync={triggerSync}
+                    setTriggerSync={setTriggerSync}
+                    allRecordsProcessed={allRecordsProcessed}
+                    setAllRecordsProcessed={setAllRecordsProcessed}
+                  />
                 ))}
               </div>
 
@@ -1212,6 +1263,7 @@ function App() {
                       </ul>
                     ) : (
                       <p>No records with changes.</p>
+                      
                     )}
                   </div>
                 </div>
