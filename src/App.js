@@ -222,21 +222,27 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
     return; // Skip event creation if a duplicate exists
   }
 
-  // Ensure enough time has passed before creating a new event
-  await sleep(30000); // Delay of 10 seconds to avoid rate limits
-  await checkIfAllRecordsProcessed()
-
-  // Proceed with creating the event if no duplicate is found
   console.log(`Creating new Google Calendar event for "${event.title}"...`);
-  
-  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
+
+  // Construct the event description with additional fields
+  let eventDescription = `Homeowner: ${event.homeownerName}\n`;
+  if (event.billable) {
+    eventDescription += `Billable: Yes\nRepair Charge: $${event.repairChargeAmount}\nReason: ${event.billableReason}\n`;
+  } else {
+    eventDescription += `Billable: No\n`;
+  }
+  eventDescription += event.description.trim();  // Append the regular description if available
+
+  // Map Airtable fields to Google Calendar event fields
   const updatedEvent = {
     summary: event.title,
-    description: event.description.trim(),
+    description: eventDescription,  // Updated description with new fields
     start: { dateTime: event.start.toISOString() },
     end: { dateTime: event.end.toISOString() },
     location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
   };
+
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
 
   try {
     const response = await fetch(url, {
@@ -261,6 +267,7 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
     return null;
   }
 }
+
 
 
 
@@ -380,13 +387,21 @@ async function fetchUnprocessedEventsFromAirtable() {
       end: new Date(record.fields['EndDate']),
       description: record.fields['description'] || '',
       processed: record.fields['Processed'] || false,
+      streetAddress: record.fields['Street Address'] || '', 
+      city: record.fields['City'] || '', 
+      state: record.fields['State'] || '', 
+      zipCode: record.fields['Zip Code'] || '', 
+      homeownerName: record.fields['Homeowner Name'] || '',  
+      billable: record.fields['Billable/Non Billable'] === 'Billable',  
+      repairChargeAmount: record.fields['Repair Charge Amount'] || '',  
+      billableReason: record.fields['Billable Reason'] || '',  
     }));
 
     console.log('Airtable events to process:', records.length);
 
     if (records.length === 0) {
       console.log('No more events to process. Terminating script.');
-      isTerminated = true; // Set flag to prevent further syncs
+      isTerminated = true; 
       return [];
     }
 
