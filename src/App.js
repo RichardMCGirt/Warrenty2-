@@ -941,26 +941,65 @@ function App() {
   const [changedRecords, setChangedRecords] = useState([]); 
   const [triggerSync, setTriggerSync] = useState(false);
   const [allRecordsProcessed, setAllRecordsProcessed] = useState(false); 
+  const [timeUntilExpiration, setTimeUntilExpiration] = useState(null); // State to track token expiration time
+
+  useEffect(() => {
+    console.log('Session details:', session);
+    if (!session || !session.provider_token) {
+      console.error('Session or provider token is missing. Cannot fetch Google Calendar event.');
+    } else {
+      console.log('Session and provider token are available. Proceeding with API request.');
+    }
+  }, [session]);
+
+  
+
+  // Define the refreshToken function here
+  const refreshToken = async () => {
+    console.log("Attempting to refresh token manually...");
+    const { error } = await supabase.auth.refreshSession();
+    if (error) {
+      console.error("Error refreshing token manually:", error.message);
+    } else {
+      console.log("Token refreshed manually");
+    }
+  };
 
    // Refactor the token refresh logic and move it inside the App component
    useEffect(() => {
     if (session) {
-      const refreshTokenBeforeExpiration = () => {
-        const expiresAt = session.expires_at; // Token expiration timestamp
+      const refreshTokenBeforeExpiration = async () => {
+        const expiresAt = session.expires_at; // Token expiration timestamp in seconds
         const currentTime = Math.floor(Date.now() / 1000); // Current timestamp in seconds
         const timeUntilExpiry = expiresAt - currentTime;
-
+  
+  
         if (timeUntilExpiry <= 300) { // Refresh token 5 minutes before it expires
-          refreshSession(); // Call manual refresh
+          await refreshSession(); // Now call the refreshSession function here
         }
+  
+        // Calculate days, hours, minutes, and seconds until expiration
+        const daysUntilExpiration = Math.floor(timeUntilExpiry / (3600 * 24)); // 1 day = 24 hours = 3600 * 24 seconds
+        const hoursUntilExpiration = Math.floor((timeUntilExpiry % (3600 * 24)) / 3600); // Remaining hours after calculating days
+        const minutesUntilExpiration = Math.floor((timeUntilExpiry % 3600) / 60); // Remaining minutes
+        const secondsUntilExpiration = timeUntilExpiry % 60; // Remaining seconds
+  
+        // Update the state with the formatted time
+        setTimeUntilExpiration(`${daysUntilExpiration}d ${hoursUntilExpiration}h ${minutesUntilExpiration}m ${secondsUntilExpiration}s`);
       };
-
-      // Check every minute if the token is about to expire
-      const interval = setInterval(refreshTokenBeforeExpiration, 60 * 1000);
-
+  
+      // Check every second to update the expiration countdown and refresh the token if needed
+      const interval = setInterval(refreshTokenBeforeExpiration, 1000);
+  
       return () => clearInterval(interval); // Clean up on component unmount
     }
   }, [session]);
+  
+  
+  
+  
+  
+
 
   const refreshSession = async () => {
     const { error } = await supabase.auth.refreshSession();  // Use the Supabase client
@@ -996,16 +1035,30 @@ function App() {
   const handleSyncNow = async () => {
     console.log('Manual sync button clicked.');
     console.log(`Syncing at ${new Date().toLocaleTimeString()}`);
-
-    
+  
+    // Check if session or access token is missing and refresh if needed
+    if (!session || !session.access_token) {
+      console.log("Access token missing, refreshing session...");
+      await refreshSession(); // Refresh the session to get a new token
+    }
+  
+    // Check again to make sure the token is now available after refresh
+    if (!session || !session.access_token) {
+      console.error("Session or access token is still missing after refresh. Cannot proceed with syncing.");
+      return; // Exit the function if token is not available
+    }
+  
     // Get unprocessed events from Airtable
     const events = await fetchUnprocessedEventsFromAirtable();
     
     // Call processEvents and pass session as a parameter
-    await processEvents(events, 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', session);  // Replace 'your_calendar_id' with your actual Google Calendar ID
+    await processEvents(events, 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', session);  // Replace with your actual Google Calendar ID
     
     setTriggerSync(true);
   };
+  
+  
+  
   
 // Schedule sync to run at every quarter-hour
 const scheduleNextSync = () => {
@@ -1174,12 +1227,19 @@ useEffect(() => {
     <div className="App">
       <div className="container">
         <h3>Automatic Sync at Each Quarter Hour</h3>
-  
+
         {/* Display the next sync time */}
         {nextSyncTime && (
           <p>Next sync scheduled for {nextSyncTime.toLocaleTimeString()}</p>
         )}
-  
+
+        {/* Display the token expiration time */}
+        {timeUntilExpiration && (
+          <p>Token will expire in: {timeUntilExpiration}</p>
+        )}
+
+<button onClick={refreshSession}>Refresh Session</button>
+
         {!session ? (
           <button onClick={handleLogin}>Sign In with Google</button>
         ) : (
