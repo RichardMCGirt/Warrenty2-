@@ -672,12 +672,48 @@ async function populateGoogleCalendarWithAirtableRecords(
 }
 
 function isEventDifferent(airtableEvent, googleEvent) {
-  // Compare key fields: title, start, end, description, location
-  const isStartDifferent = new Date(airtableEvent.start).getTime() !== new Date(googleEvent.start.dateTime).getTime();
-  const isEndDifferent = new Date(airtableEvent.end).getTime() !== new Date(googleEvent.end.dateTime).getTime();
+  // Log the events being compared for debugging
+  console.log('Comparing Airtable Event:', airtableEvent);
+  console.log('Comparing Google Event:', googleEvent);
 
-  return  isStartDifferent || isEndDifferent ;
+  // Ensure that fields are not undefined by providing default empty strings
+  const airtableTitle = (airtableEvent.title || '').trim().toLowerCase();
+  const googleTitle = (googleEvent.summary || '').trim().toLowerCase();
+  console.log(`Airtable Title: "${airtableTitle}", Google Title: "${googleTitle}"`);
+  const isTitleDifferent = airtableTitle !== googleTitle;
+
+  // Check for start time difference
+  const airtableStart = new Date(airtableEvent.start).getTime();
+  const googleStart = new Date(googleEvent.start?.dateTime || googleEvent.start?.date).getTime();
+  console.log(`Airtable Start Time: ${airtableStart}, Google Start Time: ${googleStart}`);
+  const isStartDifferent = airtableStart !== googleStart;
+
+  // Check for end time difference
+  const airtableEnd = new Date(airtableEvent.end).getTime();
+  const googleEnd = new Date(googleEvent.end?.dateTime || googleEvent.end?.date).getTime();
+  console.log(`Airtable End Time: ${airtableEnd}, Google End Time: ${googleEnd}`);
+  const isEndDifferent = airtableEnd !== googleEnd;
+
+  
+
+  // Ensure location is not undefined before comparison
+  const airtableLocation = `${airtableEvent.streetAddress || ''}, ${airtableEvent.city || ''}, ${airtableEvent.state || ''}, ${airtableEvent.zipCode || ''}`.trim().toLowerCase();
+  const googleLocation = (googleEvent.location || '').trim().toLowerCase();
+  console.log(`Airtable Location: "${airtableLocation}", Google Location: "${googleLocation}"`);
+  const isLocationDifferent = airtableLocation !== googleLocation;
+
+  // Log the results of each comparison
+  console.log('Is Title Different?', isTitleDifferent);
+  console.log('Is Start Time Different?', isStartDifferent);
+  console.log('Is End Time Different?', isEndDifferent);
+  console.log('Is Location Different?', isLocationDifferent);
+
+  // Return true if any of the key fields are different
+  return isTitleDifferent || isStartDifferent || isEndDifferent || isLocationDifferent;
 }
+
+
+
 
 async function getGoogleCalendarEvent(eventId, calendarId, session) {
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
