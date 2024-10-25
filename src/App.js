@@ -281,33 +281,39 @@ async function fetchAllGoogleCalendarEvents(calendarId, session) {
   let allEvents = [];
   let nextPageToken = null;
 
-  // Set the minimum time to the current date and time in ISO format
-  const timeMin = new Date().toISOString();
+  // Set timeMin to a very early date to fetch all past, present, and future events
+  const timeMin = '1970-01-01T00:00:00Z';  // January 1, 1970, often used as a base date in computing
 
-  do {
-    const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${timeMin}&maxResults=2500${nextPageToken ? `&pageToken=${nextPageToken}` : ''}`;
+  try {
+    do {
+      const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${timeMin}&maxResults=2500${nextPageToken ? `&pageToken=${nextPageToken}` : ''}`;
 
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${session.provider_token}`,
-        'Content-Type': 'application/json',
-      },
-    });
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${session.provider_token}`,
+          'Content-Type': 'application/json',
+        },
+      });
 
-    if (!response.ok) {
+      if (!response.ok) {
+        const data = await response.json();
+        console.error('Error fetching Google Calendar events:', data);
+        return [];
+      }
+
       const data = await response.json();
-      console.error('Error fetching Google Calendar events:', data);
-      return [];
-    }
+      allEvents = allEvents.concat(data.items);
 
-    const data = await response.json();
-    allEvents = allEvents.concat(data.items);
+      nextPageToken = data.nextPageToken; // Get the next page token, if available
+    } while (nextPageToken);
 
-    nextPageToken = data.nextPageToken; // Get the next page token, if available
-  } while (nextPageToken);
-
-  return allEvents;
+    return allEvents;
+  } catch (error) {
+    console.error("Error fetching all Google Calendar events:", error);
+    return [];
+  }
 }
+
 
 function terminateScript() {
   isTerminated = true;
