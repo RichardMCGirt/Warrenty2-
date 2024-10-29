@@ -603,20 +603,27 @@ async function populateGoogleCalendarWithAirtableRecords(
 ) {
   console.log(`Starting to populate Google Calendar "${calendarName}" with Airtable records...`);
 
-  const airtableEvents = await fetchUnprocessedEventsFromAirtable(); // Line 591
+  // Step 1: Remove duplicates from Google Calendar and mark them as unprocessed in Airtable
+  await removeDuplicateEvents(); // Remove duplicates and mark them as unprocessed in Airtable
+
+  // Step 2: Fetch unprocessed events from Airtable
+  const airtableEvents = await fetchUnprocessedEventsFromAirtable();
   const totalFetchedRecords = airtableEvents.length;
 
   if (totalFetchedRecords === 0) {
     console.log(`No unprocessed events to sync for calendar "${calendarName}".`);
+    setAllRecordsProcessed(true); // Set as processed if no unprocessed records found
     return;
   }
 
+  // Initialize counters and lists to track event processing outcomes
   let createdEventsCount = 0;
   const added = [];
   const failed = [];
   const noChange = [];
   const processedRecordIds = new Set();
 
+  // Step 3: Process each unprocessed event
   for (const event of airtableEvents) {
     if (event.googleEventId || event.processed) {
       console.log(`Skipping event "${event.title}" - GoogleEventId or Processed status already set.`);
@@ -628,47 +635,45 @@ async function populateGoogleCalendarWithAirtableRecords(
     try {
       await lockAirtableRecord(event.id);
 
-      // Check if there's a duplicate or an existing event in Google Calendar
+      // Check for duplicate in Google Calendar
       let googleEventId = await checkForDuplicateEvent(event, calendarId, session);
 
       if (googleEventId) {
         const googleEvent = await getGoogleCalendarEvent(googleEventId, calendarId, session);
 
-        // Compare the event in Airtable and Google Calendar
         if (isEventDifferent(event, googleEvent)) {
           console.log(`Updating event "${event.title}" as it has changed.`);
-          await deleteGoogleCalendarEvent(googleEventId, calendarId, session);  // Delete the old event
-          googleEventId = await createGoogleCalendarEvent(event, calendarId, session);  // Create a new one with updated details
+          await deleteGoogleCalendarEvent(googleEventId, calendarId, session); // Delete old event
+          googleEventId = await createGoogleCalendarEvent(event, calendarId, session); // Create updated event
           await updateAirtableWithGoogleEventIdAndProcessed(event.id, googleEventId, true);
         } else {
           console.log(`No changes detected for event "${event.title}". Skipping.`);
         }
         noChange.push(event.title);
         processedRecordIds.add(event.id);
-        await unlockAirtableRecord(event.id);
-        continue;
-      }
-
-      // If no existing event or duplicate is found, create a new Google event
-      googleEventId = await createGoogleCalendarEvent(event, calendarId, session);
-      if (googleEventId) {
-        await updateAirtableWithGoogleEventIdAndProcessed(event.id, googleEventId, true);
-        added.push(event.title);
-        createdEventsCount++;
       } else {
-        failed.push(event.title);
+        // If no existing or duplicate event, create a new Google event
+        googleEventId = await createGoogleCalendarEvent(event, calendarId, session);
+        if (googleEventId) {
+          await updateAirtableWithGoogleEventIdAndProcessed(event.id, googleEventId, true);
+          added.push(event.title);
+          createdEventsCount++;
+        } else {
+          failed.push(event.title);
+        }
       }
-
-      processedRecordIds.add(event.id);
     } catch (error) {
       console.error(`Error processing event "${event.title}":`, error);
       failed.push(event.title);
+    } finally {
+      await unlockAirtableRecord(event.id); // Ensure unlocking of records
     }
 
-    await unlockAirtableRecord(event.id);
-    await sleep(12000);  // Delay to avoid hitting rate limits
+    // Delay to avoid rate limits
+    await sleep(12000); 
   }
 
+  // Update state with results
   setAddedRecords((prev) => [...prev, ...added]);
   setFailedRecords((prev) => [...prev, ...failed]);
   setNoChangeRecords(noChange);
@@ -676,6 +681,7 @@ async function populateGoogleCalendarWithAirtableRecords(
   console.log(`Total number of events created: ${createdEventsCount}`);
   console.log(`Total number of records processed for calendar "${calendarName}": ${processedRecordIds.size}`);
 }
+
 
 function isEventDifferent(airtableEvent, googleEvent) {
   // Log the events being compared for debugging
@@ -949,12 +955,21 @@ function CalendarSection({
   );
 }
 
-async function removeDuplicateEvents() {
-  console.log('Checking for duplicate events in Airtable...');
-  const airtableEvents = await fetchUnprocessedEventsFromAirtable(); // Line 591
+async function removeDuplicateEvents(calendarId, session) {
+  // Check for a valid session and provider token
+  if (!session || !session.provider_token) {
+    console.error('Session or provider token is not available.');
+    return;
+  }
+
+  console.log("Checking for duplicate events in Airtable and Google Calendar...");
+
+  // Fetch unprocessed events from Airtable
+  const airtableEvents = await fetchUnprocessedEventsFromAirtable();
   const seenEvents = new Map();
   const duplicates = [];
 
+  // Identify duplicates based on unique key composed of title, homeownerName, and start date
   for (const event of airtableEvents) {
     const uniqueKey = `${event.title}|${event.homeownerName}|${event.start.toISOString()}`;
     if (seenEvents.has(uniqueKey)) {
@@ -965,97 +980,135 @@ async function removeDuplicateEvents() {
   }
 
   if (duplicates.length > 0) {
-    console.log(`Deleting ${duplicates.length} duplicates.`);
+    console.log(`Found ${duplicates.length} duplicates in Airtable. Processing deletions...`);
+
+    for (const duplicateId of duplicates) {
+      // Find the duplicate event in Airtable and delete it from Google Calendar
+      const duplicateEvent = airtableEvents.find(event => event.id === duplicateId);
+      if (duplicateEvent && duplicateEvent.googleEventId) {
+        const success = await deleteGoogleCalendarEvent(duplicateEvent.googleEventId, calendarId, session);
+        
+        if (success) {
+          // Mark as unprocessed in Airtable to allow recreation
+          await markAirtableRecordAsUnprocessed(duplicateId);
+          console.log(`Duplicate event ${duplicateEvent.googleEventId} deleted from Google Calendar and marked unprocessed in Airtable.`);
+        }
+      }
+    }
   } else {
-    console.log('No duplicates found.');
+    console.log('No duplicates found in Airtable.');
   }
 }
 
-function App() {
-  const session = useSession();  // Access the session from Supabase hook
+const App = () => {
+  const session = useSession();
   const supabase = useSupabaseClient();
   const { isLoading } = useSessionContext();
-  const [nextSyncTime, setNextSyncTime] = useState(null);
 
+  // State variables
+  const [nextSyncTime, setNextSyncTime] = useState(null);
   const [addedRecords, setAddedRecords] = useState([]);
   const [failedRecords, setFailedRecords] = useState([]);
-  const [noChangeRecords, setNoChangeRecords] = useState([]); 
-  const [changedRecords, setChangedRecords] = useState([]); 
+  const [noChangeRecords, setNoChangeRecords] = useState([]);
+  const [changedRecords, setChangedRecords] = useState([]);
   const [triggerSync, setTriggerSync] = useState(false);
-  const [allRecordsProcessed, setAllRecordsProcessed] = useState(false); 
-  const [timeUntilExpiration, setTimeUntilExpiration] = useState(null); // State to track token expiration time
+  const [allRecordsProcessed, setAllRecordsProcessed] = useState(false);
+  const [timeUntilExpiration, setTimeUntilExpiration] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
 
-  useEffect(() => {
-    console.log('Session details:', session);
-    if (!session || !session.provider_token) {
-      console.error('Session or provider token is missing. Cannot fetch Google Calendar event.');
-    } else {
-      console.log('Session and provider token are available. Proceeding with API request.');
-    }
-  }, [session]);
+  const calendarInfo = [
+    { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
+  ].sort((a, b) => a.name.localeCompare(b.name));
 
-  
-
-  // Define the refreshToken function here
-  const refreshToken = async () => {
-    console.log("Attempting to refresh token manually...");
-    const { error } = await supabase.auth.refreshSession();
-    if (error) {
-      console.error("Error refreshing token manually:", error.message);
-    } else {
-      console.log("Token refreshed manually");
+  const handleLogin = async () => {
+    try {
+      console.log('Logging in user...');
+      await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          scopes: 'https://www.googleapis.com/auth/calendar',
+          redirectTo: window.location.origin,
+        },
+      });
+    } catch (loginError) {
+      console.error('Error during login:', loginError);
     }
   };
 
-   // Refactor the token refresh logic and move it inside the App component
-   useEffect(() => {
+  const handleLogout = async () => {
+    console.log('Logging out user...');
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      console.error('Error during logout:', error.message);
+    } else {
+      console.log('User logged out successfully.');
+    }
+  };
+
+  // Refreshed session
+  const refreshSession = async () => {
+    try {
+      const { error } = await supabase.auth.refreshSession();
+      if (error) {
+        console.error('Error refreshing session:', error.message);
+        if (retryCount < 2) {
+          setRetryCount((prevRetryCount) => prevRetryCount + 1);
+        } else {
+          console.warn('Session still invalid after retries. Logging out user.');
+          handleLogout();
+        }
+      } else {
+        console.log('Session refreshed');
+        setRetryCount(0);
+      }
+    } catch (e) {
+      console.error("An error occurred while refreshing session:", e);
+      handleLogout();
+    }
+  };
+
+  // Refresh token 5 minutes before expiry
+  useEffect(() => {
     if (session) {
       const refreshTokenBeforeExpiration = async () => {
-        const expiresAt = session.expires_at; // Token expiration timestamp in seconds
-        const currentTime = Math.floor(Date.now() / 1000); // Current timestamp in seconds
+        const expiresAt = session.expires_at;
+        const currentTime = Math.floor(Date.now() / 1000);
         const timeUntilExpiry = expiresAt - currentTime;
-  
-  
-        if (timeUntilExpiry <= 300) { // Refresh token 5 minutes before it expires
-          await refreshSession(); // Now call the refreshSession function here
+
+        if (timeUntilExpiry <= 300) {
+          await refreshSession();
         }
-  
-        // Calculate days, hours, minutes, and seconds until expiration
-        const daysUntilExpiration = Math.floor(timeUntilExpiry / (3600 * 24)); // 1 day = 24 hours = 3600 * 24 seconds
-        const hoursUntilExpiration = Math.floor((timeUntilExpiry % (3600 * 24)) / 3600); // Remaining hours after calculating days
-        const minutesUntilExpiration = Math.floor((timeUntilExpiry % 3600) / 60); // Remaining minutes
-        const secondsUntilExpiration = timeUntilExpiry % 60; // Remaining seconds
-  
-        // Update the state with the formatted time
+
+        const daysUntilExpiration = Math.floor(timeUntilExpiry / (3600 * 24));
+        const hoursUntilExpiration = Math.floor((timeUntilExpiry % (3600 * 24)) / 3600);
+        const minutesUntilExpiration = Math.floor((timeUntilExpiry % 3600) / 60);
+        const secondsUntilExpiration = timeUntilExpiry % 60;
+
         setTimeUntilExpiration(`${daysUntilExpiration}d ${hoursUntilExpiration}h ${minutesUntilExpiration}m ${secondsUntilExpiration}s`);
       };
-  
-      // Check every second to update the expiration countdown and refresh the token if needed
+
       const interval = setInterval(refreshTokenBeforeExpiration, 1000);
-  
-      return () => clearInterval(interval); // Clean up on component unmount
+      return () => clearInterval(interval);
     }
   }, [session]);
-  
-  
-  
-  
-  
 
+  const handleSyncNow = async () => {
+    console.log('Manual sync button clicked.');
 
-  const refreshSession = async () => {
-    const { error } = await supabase.auth.refreshSession();  // Use the Supabase client
-
-    if (error) {
-      console.error('Error refreshing session:', error.message);
-    } else {
-      console.log('Session successfully refreshed');
+    if (!session || !session.access_token) {
+      console.log("Access token missing, refreshing session...");
+      await refreshSession();
     }
+
+    if (!session || !session.access_token) {
+      console.error("Session or access token is still missing after refresh. Cannot proceed with syncing.");
+      handleLogout();
+      return;
+    }
+
+    setTriggerSync(true);
   };
 
-
-
-  // Helper function to calculate the time remaining until the next quarter hour
   const getMillisecondsUntilNextQuarterHour = () => {
     const now = new Date();
     const minutes = now.getMinutes();
@@ -1068,198 +1121,59 @@ function App() {
     return nextSyncTime.getTime() - now.getTime(); // Return milliseconds until the next quarter-hour
   };
 
+  const scheduleNextSync = () => {
+    const delay = getMillisecondsUntilNextQuarterHour();
+    const nextSyncTimeValue = new Date(Date.now() + delay);
+    setNextSyncTime(nextSyncTimeValue);
 
-
-  const calendarInfo = [
-    { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
-  ].sort((a, b) => a.name.localeCompare(b.name));
-
-  const handleSyncNow = async () => {
-    console.log('Manual sync button clicked.');
-    console.log(`Syncing at ${new Date().toLocaleTimeString()}`);
-  
-    // Check if session or access token is missing and refresh if needed
-    if (!session || !session.access_token) {
-      console.log("Access token missing, refreshing session...");
-      await refreshSession(); // Refresh the session to get a new token
-    }
-  
-    // Check again to make sure the token is now available after refresh
-    if (!session || !session.access_token) {
-      console.error("Session or access token is still missing after refresh. Cannot proceed with syncing.");
-      return; // Exit the function if token is not available
-    }
-  
-    // Get unprocessed events from Airtable
-    const events = await fetchUnprocessedEventsFromAirtable();
-    
-    // Call processEvents and pass session as a parameter
-    await processEvents(events, 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', session);  // Replace with your actual Google Calendar ID
-    
-    setTriggerSync(true);
+    console.log(`Next sync scheduled for ${nextSyncTimeValue.toLocaleTimeString()}`);
+    setTimeout(() => {
+      handleSyncNow();
+      setInterval(handleSyncNow, 15 * 60 * 1000);
+    }, delay);
   };
-  
-  
-  
-  
-// Schedule sync to run at every quarter-hour
-const scheduleNextSync = () => {
-  const delay = getMillisecondsUntilNextQuarterHour();
-  const nextSyncTimeValue = new Date(Date.now() + delay); // Calculate the next sync time
 
-  // Update the state with the next sync time
-  setNextSyncTime(nextSyncTimeValue);
+  useEffect(() => {
+    scheduleNextSync();
+  }, []);
 
-  console.log(`Next sync scheduled for ${nextSyncTimeValue.toLocaleTimeString()}`);
+  const initializePage = async () => {
+    console.log('Initializing page...');
 
-  // Set a timeout to sync at the next quarter-hour
-  setTimeout(() => {
-    handleSyncNow(); // Run sync once the quarter-hour is reached
-
-    // After the initial sync, continue syncing every 15 minutes
-    setInterval(handleSyncNow, 15 * 60 * 1000); // Sync every 15 minutes
-  }, delay);
-};
-
-
-
-  // Login handler
-  const handleLogin = async () => {
-    try {
-      console.log('Logging in user...');
-      await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          scopes: 'https://www.googleapis.com/auth/calendar',
-          redirectTo: window.location.origin, 
-        },
-      });
-    } catch (loginError) {
-      console.error('Error during login:', loginError);
-    }
-  };
-// This is where the scheduling starts when the component is mounted
-useEffect(() => {
-  scheduleNextSync(); // Start the scheduling on component mount
-}, []); // Empty dependency array ensures this runs only once after component mount
-
-  // Logout handler
-  const handleLogout = async () => {
-    if (!session) {
-      console.error('No active session found. The user may already be logged out.');
+    if (!session || !session.provider_token) {
+      console.error('Session or provider token is missing. Cannot initialize page.');
+      handleLogout();
       return;
     }
 
     try {
-      const { error } = await supabase.auth.signOut();
-      if (error) {
-        console.error('Logout failed:', error.message);
-      } else {
-        console.log('User logged out successfully.');
-      }
-    } catch (err) {
-      console.error('Unexpected error during logout:', err);
-    }
-  };
-
-  useEffect(() => {
-    const initializePage = async () => {
-      console.log('Initializing page...');
-  
-      if (!session || !session.provider_token) {
-        console.error('Session or provider token is not available. User may not be logged in.');
-        return;
-      }
-  
-      // Step 1: Sync Google Calendar with Airtable (compare and clean up)
       await syncGoogleCalendarWithAirtable('c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', session);
-  
-      // Step 2: Continue with fetching and processing unprocessed events
       const airtableEvents = await fetchUnprocessedEventsFromAirtable();
-  
+
       if (airtableEvents.length === 0) {
-        console.log('No more events to process. Terminating script.');
+        console.log('No more events to process. All records are synced.');
+        setAllRecordsProcessed(true);
         return;
       }
-  
+
       const googleEvents = await fetchCurrentAndFutureGoogleCalendarEvents(
         'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
         session
       );
-  
+
       await compareAndSyncEvents(airtableEvents, googleEvents, session);
       await deleteDuplicateGoogleCalendarEvents('c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', session);
-    };
-  
+
+    } catch (error) {
+      console.error("Error during initialization:", error);
+    }
+  };
+
+  useEffect(() => {
     if (session) {
       initializePage();
     }
   }, [session]);
-  
-  let isSyncing = false;
-
-  async function manualSync() {
-    if (isSyncing || allRecordsProcessed) {
-      console.log('Sync already in progress or all records processed, skipping...');
-      return;
-    }
-
-    isSyncing = true; 
-    console.log('Manual sync triggered...');
-
-    await fetchAndProcessEvents();
-
-    isSyncing = false; 
-  }
-
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  let syncInProgress = false;
-
-  async function fetchAndProcessEvents() {
-    if (syncInProgress) {
-        console.log("Sync is already in progress, skipping new request.");
-        return;
-    }
-
-    syncInProgress = true;
-
-    try {
-        let events = await fetchUnprocessedEventsFromAirtable();
-
-        while (events.length > 0) {
-            console.log(`Processing ${events.length} events...`);
-            await processEvents(events);
-
-            events = await fetchUnprocessedEventsFromAirtable();
-            await sleep(5000);
-        }
-
-        console.log("No more events to process. Terminating sync.");
-
-        if (events.length === 0) {
-          console.log("All events processed, updating UI...");
-          setAllRecordsProcessed(true);
-      }
-
-    } catch (error) {
-        console.error("Error while processing events:", error);
-        syncInProgress = false; 
-    }
-  }
-
-  useEffect(() => {
-    console.log('Session details at API call:', session);
-    if (!session || !session.provider_token) {
-      console.error('Session or provider token is missing. Cannot fetch Google Calendar event.');
-    } else {
-      console.log('Proceeding with API request...');
-    }
-  }, [session]);
-
-   
 
   if (isLoading) {
     return <div>Loading...</div>;
@@ -1269,25 +1183,17 @@ useEffect(() => {
     <div className="App">
       <div className="container">
         <h3>Automatic Sync at Each Quarter Hour</h3>
+        {nextSyncTime && <p>Next sync scheduled for {nextSyncTime.toLocaleTimeString()}</p>}
+        {timeUntilExpiration && <p>Token will expire in: {timeUntilExpiration}</p>}
 
-        {/* Display the next sync time */}
-        {nextSyncTime && (
-          <p>Next sync scheduled for {nextSyncTime.toLocaleTimeString()}</p>
-        )}
-
-        {/* Display the token expiration time */}
-        {timeUntilExpiration && (
-          <p>Token will expire in: {timeUntilExpiration}</p>
-        )}
-
-<button onClick={refreshSession}>Refresh Session</button>
+        <button onClick={refreshSession}>Refresh Session</button>
 
         {!session ? (
           <button onClick={handleLogin}>Sign In with Google</button>
         ) : (
           <button onClick={handleLogout}>Logout</button>
         )}
-  
+
         {session && (
           <div style={{ width: '100%', margin: '0 auto' }}>
             <>
@@ -1312,75 +1218,13 @@ useEffect(() => {
                   />
                 ))}
               </div>
-
-              <div className="records-summary">
-                <h3>Records Summary</h3>
-                <div className="summary-container">
-                  <div className="added-records">
-                    <h4>Successfully Added Records:</h4>
-                    {addedRecords.length > 0 ? (
-                      <ul>
-                        {addedRecords.map((record, index) => (
-                          <li key={index}>{record}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p>No records added.</p>
-                    )}
-                  </div>
-
-                  <div className="failed-records">
-                    <h4>Failed to Add Records:</h4>
-                    {failedRecords.length > 0 ? (
-                      <ul>
-                        {failedRecords.map((record, index) => (
-                          <li key={index}>{record}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p>No records failed.</p>
-                    )}
-                  </div>
-
-                  <div className="change-records">
-                    <h4>Records with no Changes:</h4>
-                    {changedRecords.length > 0 ? (
-                      <ul>
-                        {changedRecords.map((record, index) => (
-                          <li key={index}>{record}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p>No records without changes.</p>
-                    )}
-                  </div>
-
-                  <div className="no-change-records">
-                    <h4>Records with Changes:</h4>
-                    {noChangeRecords.length > 0 ? (
-                      <ul>
-                        {noChangeRecords.map((record, index) => (
-                          <li key={index}>{record}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p>No records with changes.</p>
-                      
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <button id="manualSyncButton" onClick={manualSync}>Sync Now</button>
-
-              <button onClick={handleSyncNow} disabled={triggerSync}>Sync Now</button>
             </>
           </div>
         )}
       </div>
     </div>
   );
-}
+};
 
 // Helper function to check time range
 const isWithinTimeRange = () => {
