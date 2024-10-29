@@ -1181,50 +1181,62 @@ const App = () => {
 
   return (
     <div className="App">
-      <div className="container">
-        <h3>Automatic Sync at Each Quarter Hour</h3>
-        {nextSyncTime && <p>Next sync scheduled for {nextSyncTime.toLocaleTimeString()}</p>}
-        {timeUntilExpiration && <p>Token will expire in: {timeUntilExpiration}</p>}
-
-        <button onClick={refreshSession}>Refresh Session</button>
-
-        {!session ? (
-          <button onClick={handleLogin}>Sign In with Google</button>
-        ) : (
-          <button onClick={handleLogout}>Logout</button>
-        )}
-
+      <header className="app-header">
+        <h1>Calendar Sync Dashboard</h1>
         {session && (
-          <div style={{ width: '100%', margin: '0 auto' }}>
-            <>
-              <hr />
-              <button onClick={handleSyncNow}>Sync Now</button>
-              <div className="calendar-grid">
-                {calendarInfo.map((calendar) => (
-                  <CalendarSection
-                    key={calendar.id}
-                    calendarId={calendar.id}
-                    calendarName={calendar.name}
-                    session={session}
-                    signOut={handleLogout}
-                    setAddedRecords={setAddedRecords}
-                    setFailedRecords={setFailedRecords}
-                    setNoChangeRecords={setNoChangeRecords}
-                    setChangedRecords={setChangedRecords}
-                    triggerSync={triggerSync}
-                    setTriggerSync={setTriggerSync}
-                    allRecordsProcessed={allRecordsProcessed}
-                    setAllRecordsProcessed={setAllRecordsProcessed}
-                  />
-                ))}
-              </div>
-            </>
+          <div className="user-info">
+            <p>Welcome, {session.user.email}</p>
+            <button onClick={handleLogout}>Logout</button>
           </div>
         )}
-      </div>
+      </header>
+  
+      <main className="main-container">
+        <section className="status-panel">
+          <div className="sync-info">
+            <p>Next Sync: {nextSyncTime?.toLocaleTimeString()}</p>
+            <button onClick={handleSyncNow}>Sync Now</button>
+          </div>
+        </section>
+  
+        <section className="calendar-section">
+          <h2>Calendars</h2>
+          <p>Token Expires In: {timeUntilExpiration}</p>
+
+          <div className="calendar-cards">
+            {calendarInfo.map((calendar) => (
+              <div key={calendar.id} className="calendar-card">
+                <h3>{calendar.name}</h3>
+                <p>Last Sync: {nextSyncTime?.toLocaleTimeString()}</p>
+                <div className="progress-bar" />
+                <div className="record-summary">
+                  <span>Added: {addedRecords.length}</span>
+                  <span>Failed: {failedRecords.length}</span>
+                  <span>Changed: {changedRecords.length}</span>
+                  <span>No Change: {noChangeRecords.length}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+  
+        <section className="log-panel">
+          <h2>Activity Log</h2>
+          <div className="logs">
+            <p>Logs display here with filter options (Success, Error, Warning)</p>
+          </div>
+        </section>
+      </main>
+  
+      <footer className="footer">
+        <p>&copy; 2024 Vanir Installed Sales. All rights reserved.</p>
+      </footer>
     </div>
-  );
-};
+    );
+  }; // Closing bracket for App component
+  
+  
+  
 
 // Helper function to check time range
 const isWithinTimeRange = () => {
