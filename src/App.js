@@ -84,7 +84,7 @@ async function syncGoogleCalendarWithAirtable(calendarId, session) {
       await markAirtableRecordAsUnprocessed(airtableEvent.id);
     }
   }
-
+await processEvents ()
   console.log(`Google Calendar and Airtable synchronization completed. ${processedEvents.length} records are in sync.`);
 }
 
