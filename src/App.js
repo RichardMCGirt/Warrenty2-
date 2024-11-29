@@ -257,6 +257,13 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
     const data = await response.json();
     if (response.ok) {
       console.log('Event created successfully with ID:', data.id);
+
+      // Generate a link to the Google Calendar event using the event ID and start date
+      const eventLink = `https://calendar.google.com/calendar/embed?src=${calendarId}&ctz=America%2FToronto&dates=${formatGoogleCalendarDate(event.start)}/${formatGoogleCalendarDate(event.end)}`;
+      
+      // Update Airtable with the new Google Event ID, processed status, and Calendar Link
+      await updateAirtableWithGoogleEventIdAndProcessed(event.id, data.id, true, eventLink);
+
       return data.id;
     } else {
       console.error('Failed to create event:', data);
@@ -268,23 +275,26 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
   }
 }
 
+// Helper function to format dates for Google Calendar links
+function formatGoogleCalendarDate(date) {
+  const eventDate = new Date(date);
+  return eventDate.toISOString().replace(/-|:|\.\d+/g, '');
+}
 
-
-
-
-async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, googleEventId, hasChanges) {
+async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, googleEventId, hasChanges, calendarLink) {
   if (!hasChanges) {
     console.log(`No changes found for record ${airtableRecordId}. Skipping update.`);
     return; // Exit the function if no changes are found
   }
 
-  console.log(`Updating Airtable record ${airtableRecordId} with Google Event ID: ${googleEventId} and marking as processed`);
+  console.log(`Updating Airtable record ${airtableRecordId} with Google Event ID: ${googleEventId}, marking as processed, and adding Calendar Link`);
 
   const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${airtableRecordId}`;
   const updateData = {
     fields: {
       GoogleEventId: googleEventId,
       Processed: true, // Mark the record as processed to avoid duplicate syncs
+      CalendarLink: calendarLink, // Add the generated Calendar Link here
       LastUpdated: new Date().toISOString(),
     },
   };
@@ -309,6 +319,7 @@ async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, goo
     console.error('Error updating Airtable:', error);
   }
 }
+
 
 
 async function lockAirtableRecord(airtableRecordId) {
@@ -729,11 +740,7 @@ function CalendarSection({
         return;  // Exit the function after terminating
       }
   
-      // Exit if outside sync time range
-      if (!isWithinTimeRange()) {
-        console.log("Syncing is allowed only between 6:45 AM and 10:00 PM. Current time is outside this range.");
-        return;
-      }
+ 
   
       console.log('Attempting to sync events...');
   
@@ -811,13 +818,10 @@ function CalendarSection({
       {lastSyncTime && <p>Last sync: {lastSyncTime.toLocaleString()}</p>}
       {progress > 0 && <p>Sync progress: {progress.toFixed(0)}%</p>}
   
-      {!isWithinTimeRange() && (
-        <p style={{ color: 'red' }}>Syncing is allowed only between 6:45 AM and 10:00 PM. Please try again later.</p>
-      )}
+    
   
-  {isWithinTimeRange() && !allRecordsProcessed && (
   <button onClick={handleSyncNow}>Sync Now</button>
-)}
+
 
 {allRecordsProcessed && (
   <p>All records have been processed. No further syncs are required.</p>
@@ -862,276 +866,207 @@ function App() {
   const [allRecordsProcessed, setAllRecordsProcessed] = useState(false); 
 
   const calendarInfo = [
-    { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' }
+    { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' },
+    { id: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com', name: 'Charleston' },
+  { id: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com', name: 'Greensboro' },
+  { id: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com', name: 'Myrtle Beach' },
+  { id: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com', name: 'Wilmington' },
+  { id: 'https://calendar.google.com/calendar/embed?src=c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf%40group.calendar.google.com&ctz=America%2FToronto', name: 'Grenville' },
+  { id: 'https://calendar.google.com/calendar/embed?src=c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515%40group.calendar.google.com&ctz=America%2FToronto', name: 'Columbia' },
+  { id: 'warranty@vanirinstalledsales.com', name: 'Raleigh' }
   ].sort((a, b) => a.name.localeCompare(b.name));
 
-  const handleSyncNow = async () => {
-    console.log('Manual sync button clicked.');
-    
-    // Get unprocessed events from Airtable
-    const events = await fetchUnprocessedEventsFromAirtable();
-    
-    // Call processEvents and pass session as a parameter
-    await processEvents(events, 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', session);  // Replace 'your_calendar_id' with your actual Google Calendar ID
-    
-    setTriggerSync(true);
-  };
-  
+ // Login handler
+ const handleLogin = async () => {
+  try {
+    console.log('Logging in user...');
+    await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        scopes: 'https://www.googleapis.com/auth/calendar',
+        redirectTo: window.location.origin,
+      },
+    });
+  } catch (error) {
+    console.error('Error during login:', error);
+  }
+};
 
-  // Login handler
-  const handleLogin = async () => {
-    try {
-      console.log('Logging in user...');
-      await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          scopes: 'https://www.googleapis.com/auth/calendar',
-          redirectTo: window.location.origin, 
-        },
-      });
-    } catch (loginError) {
-      console.error('Error during login:', loginError);
-    }
-  };
-
-  // Logout handler
-  const handleLogout = async () => {
-    if (!session) {
-      console.error('No active session found. The user may already be logged out.');
-      return;
-    }
-
-    try {
+// Logout handler
+const handleLogout = async () => {
+  try {
+    if (session) {
       const { error } = await supabase.auth.signOut();
       if (error) {
         console.error('Logout failed:', error.message);
       } else {
         console.log('User logged out successfully.');
       }
-    } catch (err) {
-      console.error('Unexpected error during logout:', err);
+    } else {
+      console.warn('No active session found.');
     }
-  };
+  } catch (error) {
+    console.error('Unexpected error during logout:', error);
+  }
+};
 
-  useEffect(() => {
-    const initializePage = async () => {
-        console.log('Initializing page...');
+// Fetch and process Airtable events
+const fetchAndProcessEvents = async () => {
+  if (!session || !session.provider_token) {
+    console.error('Session or provider token is missing.');
+    return;
+  }
 
-        if (!session || !session.provider_token) {
-            console.error('Session or provider token is not available. User may not be logged in.');
-            return;
-        }
-
-        const airtableEvents = await fetchUnprocessedEventsFromAirtable(); 
-
-        if (airtableEvents.length === 0) {
-            console.log('No more events to process. Terminating script.');
-            return;
-        }
-
-        const googleEvents = await fetchCurrentAndFutureGoogleCalendarEvents(
-            'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-            session
-        );
-
-        await compareAndSyncEvents(airtableEvents, googleEvents, session);
-
-
-        await deleteDuplicateGoogleCalendarEvents(
-            'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-            session
-        );
-    };
-
-    if (session) {
-        initializePage();
-    }
-  }, [session]);
-
-  let isSyncing = false;
-
-  async function manualSync() {
-    if (isSyncing || allRecordsProcessed) {
-      console.log('Sync already in progress or all records processed, skipping...');
+  try {
+    const events = await fetchUnprocessedEventsFromAirtable();
+    if (events.length === 0) {
+      console.log('No unprocessed events found.');
+      setAllRecordsProcessed(true);
       return;
     }
 
-    isSyncing = true; 
-    console.log('Manual sync triggered...');
-
-    await fetchAndProcessEvents();
-
-    isSyncing = false; 
-  }
-
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  let syncInProgress = false;
-
-  async function fetchAndProcessEvents() {
-    if (syncInProgress) {
-        console.log("Sync is already in progress, skipping new request.");
-        return;
+    console.log(`Processing ${events.length} events...`);
+    for (const event of events) {
+      await processEvent(event);
     }
 
-    syncInProgress = true;
-
-    try {
-        let events = await fetchUnprocessedEventsFromAirtable();
-
-        while (events.length > 0) {
-            console.log(`Processing ${events.length} events...`);
-            await processEvents(events);
-
-            events = await fetchUnprocessedEventsFromAirtable();
-            await sleep(5000);
-        }
-
-        console.log("No more events to process. Terminating sync.");
-
-        if (events.length === 0) {
-          console.log("All events processed, updating UI...");
-          setAllRecordsProcessed(true);
-      }
-
-    } catch (error) {
-        console.error("Error while processing events:", error);
-        syncInProgress = false; 
-    }
+    console.log('Event processing complete.');
+  } catch (error) {
+    console.error('Error processing events:', error);
   }
+};
 
-  useEffect(() => {
-    console.log('Session details at API call:', session);
-    if (!session || !session.provider_token) {
-      console.error('Session or provider token is missing. Cannot fetch Google Calendar event.');
+// Handle manual sync
+const handleSyncNow = async () => {
+  console.log('Manual sync triggered.');
+  await fetchAndProcessEvents();
+  setTriggerSync(true);
+};
+
+// Event processing logic
+const processEvent = async (event) => {
+  try {
+    console.log(`Processing event: ${event.title}`);
+    const googleEventId = await createGoogleCalendarEvent(event);
+    if (googleEventId) {
+      await updateAirtableRecord(event.id, googleEventId);
+      setAddedRecords((prev) => [...prev, event.title]);
     } else {
-      console.log('Proceeding with API request...');
+      setFailedRecords((prev) => [...prev, event.title]);
     }
-  }, [session]);
+  } catch (error) {
+    console.error(`Error processing event "${event.title}":`, error);
+    setFailedRecords((prev) => [...prev, event.title]);
+  }
+};
 
-   
+// Determine the target calendar for the event
+const getTargetCalendarId = (event) => {
+  // Example: Map event properties to calendar IDs
+  const calendarMap = {
+    Savannah: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
+    Charleston: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com',
+    Greensboro: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com',
+    MyrtleBeach: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com',
+    Wilmington: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com',
+    Grenville: 'c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf@group.calendar.google.com',
+    Columbia: 'c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515@group.calendar.google.com',
+    Raleigh: 'warranty@vanirinstalledsales.com'
+};
 
-  if (isLoading) {
-    return <div>Loading...</div>;
+
+  // Use event properties to decide the calendar
+  if (event.location) {
+    if (event.location.includes('Savannah')) return calendarMap.Savannah;
+    if (event.location.includes('Charleston')) return calendarMap.Charleston;
+    if (event.location.includes('Greensboro')) return calendarMap.Greensboro;
   }
 
-  return (
-    <div className="App">
-      <div className="container">
-      
-        <h3 style={{ fontSize: '16px', textAlign: 'center' }}>Manual Sync Only</h3>
+  // Default to a general calendar or throw an error if no match
+  return calendarMap.Savannah; // Replace with your default calendar ID
+};
 
-        {!session ? (
-          <button onClick={handleLogin}>Sign In with Google</button> 
-        ) : (
-          <button onClick={handleLogout}>Logout</button>
-        )}
+// Create a Google Calendar event
+const createGoogleCalendarEvent = async (event) => {
+  try {
+    const calendarId = getTargetCalendarId(event);
+    console.log(`Posting event "${event.title}" to calendar ID: ${calendarId}`);
 
-        {session && (
-          <div style={{ width: '100%', margin: '0 auto' }}>
-            <>
-              <hr />
-              <button onClick={handleSyncNow}>Sync Now</button> 
-              <div className="calendar-grid">
-                {calendarInfo.map((calendar) => (
-                <CalendarSection
-                  key={calendar.id}
-                  calendarId={calendar.id}
-                  calendarName={calendar.name}
-                  session={session}
-                  signOut={handleLogout}
-                  setAddedRecords={setAddedRecords}
-                  setFailedRecords={setFailedRecords}
-                  setNoChangeRecords={setNoChangeRecords}
-                  setChangedRecords={setChangedRecords}
-                  triggerSync={triggerSync}
-                  setTriggerSync={setTriggerSync}
-                  allRecordsProcessed={allRecordsProcessed}
-                  setAllRecordsProcessed={setAllRecordsProcessed}
-                />
-                ))}
-              </div>
+    const response = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.provider_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          summary: event.title,
+          start: { dateTime: event.start },
+          end: { dateTime: event.end },
+        }),
+      }
+    );
 
-              <div className="records-summary">
-                <h3>Records Summary</h3>
-                <div className="summary-container">
-                  <div className="added-records">
-                    <h4>Successfully Added Records:</h4>
-                    {addedRecords.length > 0 ? (
-                      <ul>
-                        {addedRecords.map((record, index) => (
-                          <li key={index}>{record}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p>No records added.</p>
-                    )}
-                  </div>
+    if (!response.ok) {
+      throw new Error(`Failed to create event: ${response.statusText}`);
+    }
 
-                  <div className="failed-records">
-                    <h4>Failed to Add Records:</h4>
-                    {failedRecords.length > 0 ? (
-                      <ul>
-                        {failedRecords.map((record, index) => (
-                          <li key={index}>{record}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p>No records failed.</p>
-                    )}
-                  </div>
+    const data = await response.json();
+    console.log(`Event created successfully in calendar "${calendarId}":`, data.id);
+    return data.id;
+  } catch (error) {
+    console.error('Error creating Google Calendar event:', error);
+    return null;
+  }
+};
 
-                  <div className="change-records">
-                    <h4>Records with no Changes:</h4>
-                    {changedRecords.length > 0 ? (
-                      <ul>
-                        {changedRecords.map((record, index) => (
-                          <li key={index}>{record}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p>No records without changes.</p>
-                    )}
-                  </div>
 
-                  <div className="no-change-records">
-                    <h4>Records with Changes:</h4>
-                    {noChangeRecords.length > 0 ? (
-                      <ul>
-                        {noChangeRecords.map((record, index) => (
-                          <li key={index}>{record}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p>No records with changes.</p>
-                    )}
-                  </div>
-                </div>
-              </div>
+// Update Airtable record
+const updateAirtableRecord = async (recordId, googleEventId) => {
+  try {
+    const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${recordId}`;
+    const response = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        fields: {
+          GoogleEventId: googleEventId,
+          Processed: true,
+        },
+      }),
+    });
 
-              <button id="manualSyncButton" onClick={manualSync}>Sync Now</button>
+    if (!response.ok) {
+      throw new Error(`Failed to update Airtable record: ${response.statusText}`);
+    }
 
-              <button onClick={handleSyncNow} disabled={triggerSync}>Sync Now</button>
-            </>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+    console.log('Airtable record updated successfully.');
+  } catch (error) {
+    console.error('Error updating Airtable record:', error);
+  }
+};
 
-// Helper function to check time range
-const isWithinTimeRange = () => {
-  const now = new Date();
-  const currentHour = now.getHours();
-  const currentMinutes = now.getMinutes();
-
-  const isAfterStart = currentHour > 6 || (currentHour === 6 && currentMinutes >= 45); // After 6:45 AM
-  const isBeforeEnd = currentHour < 22; // Before 10:00 PM
-
-  return isAfterStart && isBeforeEnd;
+// Render component
+return (
+  <div className="App">
+    <h1>Google Calendar Sync</h1>
+    {!session ? (
+      <button onClick={handleLogin}>Sign in with Google</button>
+    ) : (
+      <button onClick={handleLogout}>Logout</button>
+    )}
+    {session && (
+      <>
+        <button onClick={handleSyncNow}>Sync Now</button>
+        <p>{`Added: ${addedRecords.length}, Failed: ${failedRecords.length}`}</p>
+      </>
+    )}
+  </div>
+);
 };
 
 export default App;
