@@ -47,8 +47,6 @@ async function processEvents(events, calendarId, session) {
   }
 }
 
-
-
 async function deleteDuplicateGoogleCalendarEvents(calendarId, session) {
   if (!session || !session.provider_token) {
     console.error('Session or provider token is not available.');
@@ -860,10 +858,7 @@ function App() {
 
   const [addedRecords, setAddedRecords] = useState([]);
   const [failedRecords, setFailedRecords] = useState([]);
-  const [noChangeRecords, setNoChangeRecords] = useState([]); 
-  const [changedRecords, setChangedRecords] = useState([]); 
-  const [triggerSync, setTriggerSync] = useState(false);
-  const [allRecordsProcessed, setAllRecordsProcessed] = useState(false); 
+ 
 
   const calendarInfo = [
     { id: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com', name: 'Savannah' },
@@ -892,10 +887,44 @@ function App() {
   }
 };
 
+const refreshSession = async () => {
+  try {
+    const { error } = await supabase.auth.refreshSession();
+    if (error) {
+      console.error('Error refreshing session:', error.message);
+      await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          scopes: 'https://www.googleapis.com/auth/calendar',
+          redirectTo: window.location.origin,
+        },
+      });
+    } else {
+      console.log('Session refreshed successfully.');
+    }
+  } catch (error) {
+    console.error('Unexpected error during session refresh:', error);
+  }
+};
+
+
 // Logout handler
 const handleLogout = async () => {
   try {
     if (session) {
+      console.log('Refreshing session before logout...');
+      // Refresh the session to ensure the token is valid
+      const { data, error: refreshError } = await supabase.auth.refreshSession();
+      console.log('Session before refreshing:', session);
+if (!session?.refresh_token) {
+  console.error('Refresh token is missing.');
+  return;
+}
+
+
+      console.log('Session refreshed successfully.');
+
+      // Proceed to sign out the user
       const { error } = await supabase.auth.signOut();
       if (error) {
         console.error('Logout failed:', error.message);
@@ -903,12 +932,15 @@ const handleLogout = async () => {
         console.log('User logged out successfully.');
       }
     } else {
-      console.warn('No active session found.');
+      console.error('Logout failed: No active session found.');
     }
   } catch (error) {
     console.error('Unexpected error during logout:', error);
   }
 };
+
+
+
 
 // Fetch and process Airtable events
 const fetchAndProcessEvents = async () => {
@@ -921,14 +953,12 @@ const fetchAndProcessEvents = async () => {
     const events = await fetchUnprocessedEventsFromAirtable();
     if (events.length === 0) {
       console.log('No unprocessed events found.');
-      setAllRecordsProcessed(true);
       return;
     }
 
     console.log(`Processing ${events.length} events...`);
-    for (const event of events) {
-      await processEvent(event);
-    }
+    const calendarId = 'your-default-calendar-id'; // Replace with the appropriate calendar ID
+    await processEvents(events, calendarId, session);
 
     console.log('Event processing complete.');
   } catch (error) {
@@ -936,12 +966,12 @@ const fetchAndProcessEvents = async () => {
   }
 };
 
-// Handle manual sync
+
 const handleSyncNow = async () => {
   console.log('Manual sync triggered.');
   await fetchAndProcessEvents();
-  setTriggerSync(true);
 };
+
 
 // Event processing logic
 const processEvent = async (event) => {
