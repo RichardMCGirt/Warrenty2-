@@ -3,48 +3,47 @@ import './App.css';
 import { useSession, useSupabaseClient} from '@supabase/auth-helpers-react';
 let isTerminated = false; // Initialize the variable early in the file
 
+
 async function processEvents(events, calendarId, session) {
   if (!session || !session.provider_token) {
-      console.error('Session or provider token is missing.');
-      return;
+    console.error('Session or provider token is missing.');
+    return;
   }
 
   for (const event of events) {
-      try {
-          console.log(`Processing event: ${event.title}`);
-          await lockAirtableRecord(event.id);
+    try {
+      console.log(`Processing event: ${event.title}`);
+      await lockAirtableRecord(event.id);
 
-          const googleEventId = await checkForDuplicateEvent(event, calendarId, session);
+      const googleEventId = await checkForDuplicateEvent(event, calendarId, session);
 
-          // ✅ Only create the event if it hasn't been processed
-          if (!googleEventId) {
-              console.log(`Creating a new event for: "${event.title}"`);
-              const newGoogleEventId = await createGoogleCalendarEvent(event, calendarId, session);
-              if (newGoogleEventId) {
-                  await updateAirtableWithGoogleEventIdAndProcessed(event.id, newGoogleEventId, true);
-              } else {
-                  console.error(`Failed to create Google Calendar event for: "${event.title}"`);
-              }
-          } else {
-              console.log(`Event already exists. Checking for updates...`);
-              const googleEvent = await getGoogleCalendarEvent(googleEventId, calendarId, session);
-              if (isEventDifferent(event, googleEvent)) {
-                  await deleteGoogleCalendarEvent(googleEventId, calendarId, session);
-                  const newGoogleEventId = await createGoogleCalendarEvent(event, calendarId, session);
-                  await updateAirtableWithGoogleEventIdAndProcessed(event.id, newGoogleEventId, true);
-              } else {
-                  console.log(`No changes detected for "${event.title}".`);
-              }
-          }
-          await unlockAirtableRecord(event.id);
-
-      } catch (error) {
-          console.error(`Error processing event "${event.title}":`, error);
-          await unlockAirtableRecord(event.id);
+      if (!googleEventId) {
+        console.log(`Creating a new event for: "${event.title}"`);
+        const newGoogleEventId = await createGoogleCalendarEvent(event, calendarId, session);
+        if (newGoogleEventId) {
+          await updateAirtableWithGoogleEventIdAndProcessed(event.id, newGoogleEventId, true);
+        } else {
+          console.error(`Failed to create Google Calendar event for: "${event.title}"`);
+        }
+      } else {
+        console.log(`Event already exists. Checking for updates...`);
+        const googleEvent = await getGoogleCalendarEvent(googleEventId, calendarId, session);
+        if (isEventDifferent(event, googleEvent)) {
+          await deleteGoogleCalendarEvent(googleEventId, calendarId, session);
+          const newGoogleEventId = await createGoogleCalendarEvent(event, calendarId, session);
+          await updateAirtableWithGoogleEventIdAndProcessed(event.id, newGoogleEventId, true);
+        } else {
+          console.log(`No changes detected for "${event.title}".`);
+        }
       }
+      await unlockAirtableRecord(event.id);
+
+    } catch (error) {
+      console.error(`Error processing event "${event.title}":`, error);
+      await unlockAirtableRecord(event.id);
+    }
   }
 }
-
 
 function terminateScript() {
   isTerminated = true;
@@ -237,9 +236,6 @@ async function fetchUnprocessedEventsFromAirtable() {
       return [];
   }
 }
-
-
-
 
 function clearAllTimers() {
   const highestTimeoutId = setTimeout(() => {}, 0);
@@ -604,8 +600,7 @@ function App() {
     nextQuarterHour.setMinutes(Math.ceil(now.getMinutes() / 15) * 15, 0, 0);
     return Math.max(0, Math.floor((nextQuarterHour - now) / 1000)); // Return remaining time in seconds
   }
-  
-  const session = useSession(); // Access the session from Supabase hook
+
   const supabase = useSupabaseClient();
   const [countdown, setCountdown] = useState(getTimeUntilNextQuarterHour());
   const [calendarEvents, setCalendarEvents] = useState(
@@ -617,179 +612,159 @@ function App() {
     )
   );
 
+  const session = useSession();
+
+
   const handleLogin = async () => {
     try {
-      console.log('Logging in user...');
-      await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          scopes: 'https://www.googleapis.com/auth/calendar',
-          redirectTo: window.location.origin,
-        },
-      });
+        await supabase.auth.signInWithOAuth({
+            provider: 'google',
+            options: {
+                scopes: 'https://www.googleapis.com/auth/calendar',
+                redirectTo: window.location.origin,
+            },
+        });
     } catch (error) {
-      console.error('Error during login:', error);
+        console.error('Error during login:', error);
     }
-  };
+};
 
-  const handleLogout = async () => {
-    try {
-      if (session) {
-        console.log('Refreshing session before logout...');
-        const { error } = await supabase.auth.signOut();
-        if (error) {
-          console.error('Logout failed:', error.message);
-        } else {
-          console.log('User logged out successfully.');
-        }
-      } else {
-        console.error('Logout failed: No active session found.');
+const handleLogout = async () => {
+  try {
+      const { error } = await supabase.auth.refreshSession();
+      if (error) {
+          console.error('Error refreshing session:', error);
       }
-    } catch (error) {
-      console.error('Unexpected error during logout:', error);
-    }
-  };
-
-  const fetchAndProcessEvents = async () => {
-    if (isTerminated) {
-        console.log('Script is terminated. Skipping further processing.');
-        return;
-    }
-
-    if (!session || !session.provider_token) {
-        console.error('Session or provider token is missing.');
-        return;
-    }
-
-    try {
-        console.log('Fetching and processing events for all calendars...');
-        const events = await fetchUnprocessedEventsFromAirtable();
-
-        if (events.length === 0) {
-            console.log('No unprocessed events found. Terminating sync process.');
-            return;
-        }
-
-        // Normalize the calendar map keys for case-insensitive matching
-        const normalizedCalendarMap = Object.keys(calendarMap).reduce((acc, key) => {
-            acc[key.toLowerCase().replace(/\s+/g, '')] = calendarMap[key];
-            return acc;
-        }, {});
-
-        for (const event of events) {
-            try {
-                if (!event.b) {
-                    console.warn(`Skipping event "${event.title}" due to missing branch value.`);
-                    continue;  // Skip event if the 'b' field is missing
-                }
-
-                const normalizedEventBranch = event.b.toLowerCase().replace(/\s+/g, '');
-                const calendarId = normalizedCalendarMap[normalizedEventBranch];
-
-                if (!calendarId) {
-                    console.warn(`No matching calendar found for event: "${event.title}" with branch: "${event.b}"`);
-                    continue;
-                }
-
-                // Attempt to process each event and create it in Google Calendar
-                console.log(`Creating event for "${event.title}" in calendar: ${event.b}`);
-                await processEvents([event], calendarId, session);
-            } catch (error) {
-                console.error(`Error creating event for "${event.title}":`, error);
-            }
-        }
-
-        console.log('Event processing for all calendars complete.');
-    } catch (error) {
-        console.error('Error processing events:', error);
-    }
+      await supabase.auth.signOut();
+      console.log('User logged out successfully.');
+  } catch (error) {
+      console.error('Error during logout:', error);
+  }
 };
 
 
 
-  
+const fetchAndProcessEvents = async () => {
+  console.log('Fetching and processing events for all calendars...');
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (isTerminated) {
-        clearInterval(interval); // Stop the interval if the script is terminated
-        console.log('Termination detected. Stopping periodic sync.');
-        return;
+  const updatedCalendarEvents = { ...calendarEvents };
+
+  for (const [calendarName, calendarId] of Object.entries(calendarMap)) {
+    console.log(`Processing events for calendar: ${calendarName}`);
+
+    try {
+      const events = await fetchUnprocessedEventsFromAirtable();
+      console.log(`Fetched ${events.length} unprocessed events from Airtable for calendar: ${calendarName}`);
+
+      const addedEvents = [];
+
+      for (const event of events) {
+        try {
+          // Check if the event matches the calendar
+          if (event.b.toLowerCase().replace(/\s+/g, '') === calendarName.toLowerCase()) {
+            console.log(`Creating Google Calendar event for: "${event.title}" on calendar "${calendarName}"`);
+
+            const googleEventId = await createGoogleCalendarEvent(event, calendarId, session);
+
+            if (googleEventId) {
+              console.log(`Successfully created Google Calendar event with ID: ${googleEventId} for: "${event.title}"`);
+              addedEvents.push(`${event.title} on ${event.start.toISOString().split('T')[0]}`);
+
+              // Mark the record as processed in Airtable
+              console.log(`Marking Airtable record "${event.id}" as processed`);
+              await updateAirtableWithGoogleEventIdAndProcessed(event.id, googleEventId, true);
+            } else {
+              console.error(`Failed to create Google Calendar event for: "${event.title}"`);
+            }
+          } else {
+            console.log(`Skipping event "${event.title}" as it doesn't match the calendar "${calendarName}"`);
+          }
+        } catch (error) {
+          console.error(`Error processing event "${event.title}":`, error);
+        }
       }
-  
+
+      updatedCalendarEvents[calendarName] = {
+        ...updatedCalendarEvents[calendarName],
+        added: [...updatedCalendarEvents[calendarName].added, ...addedEvents],
+      };
+    } catch (error) {
+      console.error(`Error processing events for calendar "${calendarName}":`, error);
+    }
+  }
+
+  console.log('Finished processing events for all calendars.');
+  setCalendarEvents(updatedCalendarEvents);
+};
+
+
+function terminateScript() {
+  isTerminated = true;
+  console.log("Terminating all processes.");
+  clearAllTimers();
+}
+
+if (typeof isTerminated !== 'undefined' && isTerminated) {
+  console.log("Script is terminated. Skipping further actions.");
+}
+
+useEffect(() => {
+  const getTimeUntilNextQuarterHour = () => {
+    const now = new Date();
+    const nextQuarterHour = new Date(now);
+    nextQuarterHour.setMinutes(Math.ceil(now.getMinutes() / 15) * 15, 0, 0);
+    return Math.max(0, Math.floor((nextQuarterHour - now) / 1000));
+  };
+
+  const interval = setInterval(() => {
+    const currentHour = new Date().getHours();
+    if (currentHour >= 7 && currentHour <= 17 && !isTerminated) {
       const timeUntilNextSync = getTimeUntilNextQuarterHour();
-      setCountdown(timeUntilNextSync); // Update the countdown
-  
-      if (timeUntilNextSync === 0) {
-        fetchAndProcessEvents(); // Trigger event processing when the countdown reaches zero
-      }
-    }, 1000); // Update every second
-  
-    return () => clearInterval(interval); // Cleanup interval on component unmount
-  }, [session]); // Re-run effect when session changes
-  
-  
+      setCountdown(timeUntilNextSync);
 
-  return (
-    <div className="App">
-      <h1>Google Calendar Sync</h1>
-      {!session ? (
-        <button onClick={handleLogin}>Sign in with Google</button>
-      ) : (
-        <button onClick={handleLogout}>Logout</button>
-      )}
-      {session && (
-        <>
-          <button onClick={fetchAndProcessEvents}>Sync Now</button>
-          <p>Next sync in: {formatCountdown(countdown)}</p>
-          <div>
-            {Object.entries(calendarEvents).map(([calendarName, { added, failed, noChange }]) => {
-              const hasAdded = added.length > 0;
-              const hasFailed = failed.length > 0;
-              const hasNoChange = noChange.length > 0;
-  
-              return (
-                <div key={calendarName} className="calendar-section">
-                  <h2>{calendarName}</h2>
-                  {hasAdded && (
-                    <div>
-                      <h3>Added Events</h3>
-                      <ul>
-                        {added.map((event, index) => (
-                          <li key={index}>{event}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {hasFailed && (
-                    <div>
-                      <h3>Failed Events</h3>
-                      <ul>
-                        {failed.map((event, index) => (
-                          <li key={index}>{event}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {hasNoChange && (
-                    <div>
-                      <h3>No Changes</h3>
-                      <ul>
-                        {noChange.map((event, index) => (
-                          <li key={index}>{event}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-    </div>
-  );
-  
+      if (timeUntilNextSync === 0) {
+        fetchAndProcessEvents().then(() => {
+          setCountdown(getTimeUntilNextQuarterHour()); // Reset the countdown after syncing
+        });
+      }
+    }
+  }, 1000);
+
+  return () => clearInterval(interval);
+}, [session]);
+
+return (
+  <div className="App">
+    <h1>Google Calendar Sync</h1>
+    <p>Next sync in: {formatCountdown(countdown)}</p>
+    {!session ? (
+      <button onClick={handleLogin}>Sign in with Google</button>
+    ) : (
+      <button onClick={handleLogout}>Logout</button>
+    )}
+    {session && (
+      <>
+        <button onClick={fetchAndProcessEvents}>Sync Now</button>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '20px' }}>
+          {Object.entries(calendarEvents).map(([calendarName, { added }]) => (
+            <div key={calendarName} className="calendar-section">
+              <h2>{calendarName}</h2>
+              {added.length > 0 ? (
+                <ul>
+                  {added.map((event, index) => (
+                    <li key={index}>{event}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p></p>
+              )}
+            </div>
+          ))}
+        </div>
+      </>
+    )}
+  </div>
+);
 }
 
 export default App;
