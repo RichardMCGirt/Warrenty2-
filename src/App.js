@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import './App.css';
 import { useSession, useSupabaseClient} from '@supabase/auth-helpers-react';
@@ -202,7 +203,7 @@ async function fetchUnprocessedEventsFromAirtable() {
   }
 
   console.log('Fetching unprocessed events from Airtable...');
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=OR({Processed}=FALSE())`;
+  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=AND(OR({Processed}=FALSE()), NOT({EndDate}=''))`;
 
   try {
       const response = await fetch(url, {
