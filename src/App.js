@@ -4,48 +4,6 @@ import './App.css';
 import { useSession, useSupabaseClient} from '@supabase/auth-helpers-react';
 let isTerminated = false; // Initialize the variable early in the file
 
-
-async function processEvents(events, calendarId, session) {
-  if (!session || !session.provider_token) {
-    console.error('Session or provider token is missing.');
-    return;
-  }
-
-  for (const event of events) {
-    try {
-      console.log(`Processing event: ${event.title}`);
-      await lockAirtableRecord(event.id);
-
-      const googleEventId = await checkForDuplicateEvent(event, calendarId, session);
-
-      if (!googleEventId) {
-        console.log(`Creating a new event for: "${event.title}"`);
-        const newGoogleEventId = await createGoogleCalendarEvent(event, calendarId, session);
-        if (newGoogleEventId) {
-          await updateAirtableWithGoogleEventIdAndProcessed(event.id, newGoogleEventId, true);
-        } else {
-          console.error(`Failed to create Google Calendar event for: "${event.title}"`);
-        }
-      } else {
-        console.log(`Event already exists. Checking for updates...`);
-        const googleEvent = await getGoogleCalendarEvent(googleEventId, calendarId, session);
-        if (isEventDifferent(event, googleEvent)) {
-          await deleteGoogleCalendarEvent(googleEventId, calendarId, session);
-          const newGoogleEventId = await createGoogleCalendarEvent(event, calendarId, session);
-          await updateAirtableWithGoogleEventIdAndProcessed(event.id, newGoogleEventId, true);
-        } else {
-          console.log(`No changes detected for "${event.title}".`);
-        }
-      }
-      await unlockAirtableRecord(event.id);
-
-    } catch (error) {
-      console.error(`Error processing event "${event.title}":`, error);
-      await unlockAirtableRecord(event.id);
-    }
-  }
-}
-
 function terminateScript() {
   isTerminated = true;
   console.log("Terminating all processes.");
@@ -58,48 +16,53 @@ if (typeof isTerminated !== 'undefined' && isTerminated) {
 
 // Creates a new Google Calendar event
 async function createGoogleCalendarEvent(event, calendarId, session) {
+  console.log(`Checking for duplicate event before creating: "${event.title}"`);
+
+  // Check if an exact duplicate event already exists in Google Calendar
+  const duplicateEventId = await checkForDuplicateEvent(event, calendarId, session);
+
+  if (duplicateEventId) {
+    console.log(`Skipping creation: Event "${event.title}" already exists in Google Calendar.`);
+    return duplicateEventId; // Return the existing event ID to avoid duplicate creation
+  }
+
   console.log(`Creating new Google Calendar event for: "${event.title}"...`);
 
   // Prepare the event object for Google Calendar API
   const updatedEvent = {
-      summary: event.title,
-      description: event.description,
-      start: { dateTime: event.start.toISOString() },
-      end: { dateTime: event.end.toISOString() },
-      location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
+    summary: event.title,
+    description: event.description,
+    start: { dateTime: event.start.toISOString() },
+    end: { dateTime: event.end.toISOString() },
+    location: `${event.streetAddress}, ${event.city}, ${event.state}, ${event.zipCode}`,
   };
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
 
   try {
-      const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-              Authorization: `Bearer ${session.provider_token}`,
-              'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(updatedEvent),
-      });
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.provider_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(updatedEvent),
+    });
 
-      const data = await response.json();
-      if (!response.ok) {
-          console.error('Failed to create Google Calendar event:', data);
-          return null;
-      }
-
-      console.log('Event created successfully with ID:', data.id);
-      return data.id;
-  } catch (error) {
-      console.error('Error creating Google Calendar event:', error);
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('Failed to create Google Calendar event:', data);
       return null;
+    }
+
+    console.log('Event created successfully with ID:', data.id);
+    return data.id;
+  } catch (error) {
+    console.error('Error creating Google Calendar event:', error);
+    return null;
   }
 }
 
-// Helper function to format dates for Google Calendar links
-function formatGoogleCalendarDate(date) {
-  const eventDate = new Date(date);
-  return eventDate.toISOString().replace(/-|:|\.\d+/g, '');
-}
 
 async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, googleEventId, hasChanges, calendarLink) {
   if (!hasChanges) {
@@ -203,7 +166,7 @@ async function fetchUnprocessedEventsFromAirtable() {
   }
 
   console.log('Fetching unprocessed events from Airtable...');
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=AND(OR({Processed}=FALSE()), NOT({EndDate}=''))`;
+  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=NOT({EndDate}='')`;
 
   try {
       const response = await fetch(url, {
@@ -253,43 +216,46 @@ function clearAllTimers() {
 
 // Check for duplicate Google Calendar events
 async function checkForDuplicateEvent(event, calendarId, session) {
-  console.log(`Checking for duplicate event for: "${event.title}"`);
+  console.log(`Checking for duplicate event: "${event.title}"`);
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
   const timeMin = new Date(event.start).toISOString();
   const timeMax = new Date(event.end).toISOString();
 
   try {
-      const response = await fetch(`${url}?timeMin=${timeMin}&timeMax=${timeMax}`, {
-          headers: {
-              Authorization: `Bearer ${session.provider_token}`,
-          },
-      });
+    const response = await fetch(`${url}?timeMin=${timeMin}&timeMax=${timeMax}`, {
+      headers: {
+        Authorization: `Bearer ${session.provider_token}`,
+      },
+    });
 
-      const data = await response.json();
-      if (!response.ok) {
-          console.error('Failed to fetch events from Google Calendar:', data);
-          return null;
-      }
-
-      const duplicateEvent = data.items.find(existingEvent =>
-          existingEvent.summary === event.title &&
-          existingEvent.start.dateTime === event.start.toISOString() &&
-          existingEvent.end.dateTime === event.end.toISOString()
-      );
-
-      if (duplicateEvent) {
-          console.log('Duplicate event found:', duplicateEvent.id);
-          return duplicateEvent.id;
-      }
-
-      console.log('No duplicate event found.');
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('Failed to fetch events from Google Calendar:', data);
       return null;
+    }
+
+    // Check if an exact event match already exists
+    const duplicateEvent = data.items.find(existingEvent =>
+      existingEvent.summary === event.title &&
+      existingEvent.start.dateTime === event.start.toISOString() &&
+      existingEvent.end.dateTime === event.end.toISOString() &&
+      existingEvent.description === event.description
+    );
+
+    if (duplicateEvent) {
+      console.log(`Duplicate event found: "${event.title}", ID: ${duplicateEvent.id}`);
+      return duplicateEvent.id;
+    }
+
+    console.log(`No duplicate event found for: "${event.title}".`);
+    return null;
   } catch (error) {
-      console.error('Error checking for duplicate events:', error);
-      return null;
+    console.error('Error checking for duplicate events:', error);
+    return null;
   }
 }
+
 
 
 
@@ -393,24 +359,25 @@ function isEventDifferent(airtableEvent, googleEvent) {
 async function getGoogleCalendarEvent(eventId, calendarId, session) {
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
   try {
-      const response = await fetch(url, {
-          headers: {
-              Authorization: `Bearer ${session.provider_token}`,
-          },
-      });
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${session.provider_token}`,
+      },
+    });
 
-      if (!response.ok) {
-          console.error('Failed to fetch event from Google Calendar');
-          return null;
-      }
-
-      const data = await response.json();
-      return data;
-  } catch (error) {
-      console.error('Error fetching Google Calendar event:', error);
+    if (!response.ok) {
+      console.error(`Failed to fetch event from Google Calendar: ${eventId}`);
       return null;
+    }
+
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error('Error fetching Google Calendar event:', error);
+    return null;
   }
 }
+
 
 async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
@@ -550,7 +517,6 @@ function CalendarSection({
 {allRecordsProcessed && (
   <p>All records have been processed. No further syncs are required.</p>
 )}
-
     </div>
   );
 }
@@ -586,13 +552,13 @@ function formatCountdown(seconds) {
 function App() {
   const calendarMap = {
     Savannah: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-    Charleston: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com',
-    Greensboro: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com',
-    MyrtleBeach: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com',
-    Wilmington: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com',
-    Grenville: 'c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf@group.calendar.google.com',
-    Columbia: 'c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515@group.calendar.google.com',
-    Raleigh: 'warranty@vanirinstalledsales.com',
+   // Charleston: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com',
+   // Greensboro: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com',
+   // MyrtleBeach: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com',
+   // Wilmington: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com',
+   // Grenville: 'c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf@group.calendar.google.com',
+   // Columbia: 'c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515@group.calendar.google.com',
+   // Raleigh: 'warranty@vanirinstalledsales.com',
   };
 
   function getTimeUntilNextQuarterHour() {
@@ -643,60 +609,148 @@ const handleLogout = async () => {
   }
 };
 
-
-
 const fetchAndProcessEvents = async () => {
   console.log('Fetching and processing events for all calendars...');
 
-  const updatedCalendarEvents = { ...calendarEvents };
+  if (isTerminated) {
+    console.log("Script is terminated. Skipping event processing.");
+    return;
+  }
 
   for (const [calendarName, calendarId] of Object.entries(calendarMap)) {
     console.log(`Processing events for calendar: ${calendarName}`);
 
     try {
-      const events = await fetchUnprocessedEventsFromAirtable();
-      console.log(`Fetched ${events.length} unprocessed events from Airtable for calendar: ${calendarName}`);
+      // Fetch Airtable events only if field 'b' matches the calendar name
+      const airtableEvents = await fetchUnprocessedEventsFromAirtable();
+      const filteredAirtableEvents = airtableEvents.filter(event => 
+        event.b.toLowerCase().replace(/\s+/g, '') === calendarName.toLowerCase()
+      );
 
-      const addedEvents = [];
+      console.log(`Filtered ${filteredAirtableEvents.length} events from Airtable for calendar: ${calendarName}`);
 
-      for (const event of events) {
-        try {
-          // Check if the event matches the calendar
-          if (event.b.toLowerCase().replace(/\s+/g, '') === calendarName.toLowerCase()) {
-            console.log(`Creating Google Calendar event for: "${event.title}" on calendar "${calendarName}"`);
+      // Fetch all events from Google Calendar
+      const googleCalendarEvents = await fetchGoogleCalendarEvents(calendarId, session);
+      console.log(`Fetched ${googleCalendarEvents.length} events from Google Calendar: ${calendarName}`);
 
-            const googleEventId = await createGoogleCalendarEvent(event, calendarId, session);
+      // Create a map for quick lookup using event titles
+      const googleEventMap = new Map();
+      googleCalendarEvents.forEach(event => {
+        googleEventMap.set(event.summary.toLowerCase().trim(), event); // Store using event title as key
+      });
 
-            if (googleEventId) {
-              console.log(`Successfully created Google Calendar event with ID: ${googleEventId} for: "${event.title}"`);
-              addedEvents.push(`${event.title} on ${event.start.toISOString().split('T')[0]}`);
+      // 🔹 Step 1: Process Airtable Events (Avoid Duplicates)
+      for (const airtableEvent of filteredAirtableEvents) {
+        const eventTitle = airtableEvent.title.toLowerCase().trim();
+        const matchingGoogleEvent = googleEventMap.get(eventTitle);
 
-              // Mark the record as processed in Airtable
-              console.log(`Marking Airtable record "${event.id}" as processed`);
-              await updateAirtableWithGoogleEventIdAndProcessed(event.id, googleEventId, true);
-            } else {
-              console.error(`Failed to create Google Calendar event for: "${event.title}"`);
-            }
+        if (matchingGoogleEvent) {
+          // Event exists, check if update is needed
+          if (isEventDifferent(airtableEvent, matchingGoogleEvent)) {
+            console.log(`Updating event: ${airtableEvent.title}`);
+            await updateGoogleCalendarEvent(
+              matchingGoogleEvent.id,
+              airtableEvent.title,
+              airtableEvent.start,
+              airtableEvent.end,
+              calendarId,
+              session
+            );
+            console.log(`Event "${airtableEvent.title}" updated successfully.`);
           } else {
-            console.log(`Skipping event "${event.title}" as it doesn't match the calendar "${calendarName}"`);
+            console.log(`No changes detected for event: ${airtableEvent.title}, skipping update.`);
           }
-        } catch (error) {
-          console.error(`Error processing event "${event.title}":`, error);
+        } else {
+          // No event found in Google Calendar, create a new one
+          console.log(`Creating new event: ${airtableEvent.title}`);
+          const googleEventId = await createGoogleCalendarEvent(airtableEvent, calendarId, session);
+          if (googleEventId) {
+            await updateAirtableWithGoogleEventIdAndProcessed(airtableEvent.id, googleEventId, true);
+            console.log(`New event created and linked: ${airtableEvent.title}`);
+          }
         }
       }
 
-      updatedCalendarEvents[calendarName] = {
-        ...updatedCalendarEvents[calendarName],
-        added: [...updatedCalendarEvents[calendarName].added, ...addedEvents],
-      };
+      console.log(`Finished processing events for calendar: ${calendarName}`);
     } catch (error) {
       console.error(`Error processing events for calendar "${calendarName}":`, error);
     }
   }
 
   console.log('Finished processing events for all calendars.');
-  setCalendarEvents(updatedCalendarEvents);
 };
+
+
+
+
+
+
+function isEventDifferent(airtableEvent, googleEvent) {
+  const isTitleDifferent = airtableEvent.title !== googleEvent.summary;
+  const isStartDifferent = new Date(airtableEvent.start).toISOString() !== googleEvent.start.dateTime;
+  const isEndDifferent = new Date(airtableEvent.end).toISOString() !== googleEvent.end.dateTime;
+  const isDescriptionDifferent = (airtableEvent.description || '') !== (googleEvent.description || '');
+  const isLocationDifferent = (airtableEvent.location || '') !== (googleEvent.location || '');
+
+  return isTitleDifferent || isStartDifferent || isEndDifferent || isDescriptionDifferent || isLocationDifferent;
+}
+
+
+async function fetchGoogleCalendarEvents(calendarId, session) {
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${session.provider_token}`,
+      },
+    });
+
+    if (!response.ok) {
+      const data = await response.json();
+      console.error('Failed to fetch Google Calendar events:', data);
+      return [];
+    }
+
+    const data = await response.json();
+    return data.items;
+  } catch (error) {
+    console.error('Error fetching Google Calendar events:', error);
+    return [];
+  }
+}
+
+
+
+async function updateGoogleCalendarEvent(eventId, title, start, end, calendarId, session) {
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
+  const updatedEvent = {
+    summary: title,
+    start: { dateTime: start.toISOString() },
+    end: { dateTime: end.toISOString() },
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${session.provider_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(updatedEvent),
+    });
+
+    if (!response.ok) {
+      const data = await response.json();
+      console.error('Failed to update Google Calendar event:', data);
+    } else {
+      console.log(`Updated Google Calendar event: ${title}`);
+    }
+  } catch (error) {
+    console.error('Error updating Google Calendar event:', error);
+  }
+}
+
 
 
 function terminateScript() {
@@ -737,11 +791,13 @@ useEffect(() => {
 return (
   <div className="App">
     <h1>Google Calendar Sync</h1>
+    
     <p>Next sync in: {formatCountdown(countdown)}</p>
     {!session ? (
       <button onClick={handleLogin}>Sign in with Google</button>
     ) : (
       <button onClick={handleLogout}>Logout</button>
+      
     )}
     {session && (
       <>
