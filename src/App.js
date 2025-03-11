@@ -98,9 +98,17 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
   }
 
   // ✅ Ensure location is properly defined
-  const location = [event.streetAddress, event.city, event.state, event.zipCode]
-    .filter(Boolean)
-    .join(", ");
+  // ✅ Ensure location is properly defined
+const location = [
+  event.streetAddress, 
+  event.city, 
+  event.state, 
+  event.zipCode
+].filter(Boolean).join(", ");
+
+// ✅ Log the extracted location before creating the event
+console.log(`📌 Location extracted for event "${event.title}":`, location);
+console.log("🔍 Event Object Before Google Calendar Creation:", event);
 
 
   // ✅ Create the event object
@@ -109,8 +117,9 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
     description: event.description || "No description provided",
     start: { dateTime: startDate, timeZone: "America/Toronto" },
     end: { dateTime: endDate, timeZone: "America/Toronto" },
-    location: location || "Unknown Location",
-  };
+    location: event.location || "Unknown Location", // ✅ Ensure it comes from the fetched event
+};
+
 
   // ✅ Log event details for debugging
   console.log("📝 Event Details:");
@@ -270,16 +279,24 @@ async function fetchUnprocessedEventsFromAirtable() {
             start: new Date(record.fields['FormattedStartDate']),
             end: new Date(record.fields['FormattedEndDate']),
             description: record.fields['Description of Issue'] || '',
-            b: record.fields['b'] || '',  // ✅ Added the 'b' field here
+            b: record.fields['b'] || '',
             processed: record.fields['Processed'] || false,
+            streetAddress: record.fields['Street Address'] || "",
+            city: record.fields['City'] || "",
+            state: record.fields['State'] || "",
+            zipCode: record.fields['Zip Code'] || "",
             location: [
                 record.fields['Street Address'],
                 record.fields['City'],
                 record.fields['State'],
                 record.fields['Zip Code']
-            ].filter(Boolean).join(', ')  // ✅ Joins fields with a comma, removing any empty values
+            ].filter(Boolean).join(', ')
         }));
         
+        console.log("🚀 Processed Airtable records:", records);
+        
+        console.log("Fetched raw Airtable data:", data.records);
+
 
       console.log("Fetched unprocessed records:", records);
       
@@ -502,17 +519,13 @@ async function populateGoogleCalendarWithAirtableRecords(
   console.log(`✅ Total number of records processed for calendar "${calendarName}": ${processedRecordIds.size}`);
 }
 
-
-
-
-
 function isEventDifferent(airtableEvent, googleEvent) {
   if (!airtableEvent || !googleEvent || !googleEvent.start || !googleEvent.end) {
     console.error('❌ Missing required event data:', { airtableEvent, googleEvent });
     return true; // Consider it different if any required data is missing
   }
 
-  // ✅ Function to safely convert date strings to ISO format
+  // Function to safely convert date strings to ISO format
   function safeNormalizeToISO(dateStr) {
     if (!dateStr) return null;
     
@@ -522,16 +535,16 @@ function isEventDifferent(airtableEvent, googleEvent) {
       return null;
     }
 
-   // return date.toISOString(); // Converts to strict "YYYY-MM-DDTHH:mm:ss.sssZ"
+    return date.toISOString(); // Converts to strict "YYYY-MM-DDTHH:mm:ss.sssZ"
   }
 
-  // ✅ Convert both Google and Airtable dates safely
+  // Convert both Google and Airtable dates safely
   const googleStart = safeNormalizeToISO(googleEvent.start.dateTime || googleEvent.start.date);
   const googleEnd = safeNormalizeToISO(googleEvent.end.dateTime || googleEvent.end.date);
   const airtableStart = safeNormalizeToISO(airtableEvent.start);
   const airtableEnd = safeNormalizeToISO(airtableEvent.end);
 
-  // ✅ Check if any date conversion failed
+  // Check if any date conversion failed
   if (!googleStart || !googleEnd || !airtableStart || !airtableEnd) {
     console.error("❌ One or more event dates are invalid:", {
       airtableStart, airtableEnd, googleStart, googleEnd,
@@ -540,14 +553,19 @@ function isEventDifferent(airtableEvent, googleEvent) {
     return true; // Treat as different if any date is invalid
   }
 
-  // ✅ Compare event fields safely
-  const isTitleDifferent = (airtableEvent.title || "").trim().toLowerCase() !== (googleEvent.summary || "").trim().toLowerCase();
+  // Normalize text for comparison (trim, lowercase, remove extra spaces)
+  function normalizeText(text) {
+    return (text || "").trim().replace(/\s+/g, " ").toLowerCase();
+  }
+
+  // Compare event fields safely
+  const isTitleDifferent = normalizeText(airtableEvent.title) !== normalizeText(googleEvent.summary);
   const isStartDifferent = airtableStart !== googleStart;
   const isEndDifferent = airtableEnd !== googleEnd;
-  const isDescriptionDifferent = (airtableEvent.description || "").trim() !== (googleEvent.description || "").trim();
-  const isLocationDifferent = (airtableEvent.location || "").trim() !== (googleEvent.location || "").trim();
+  const isDescriptionDifferent = normalizeText(airtableEvent.description) !== normalizeText(googleEvent.description);
+  const isLocationDifferent = normalizeText(airtableEvent.location) !== normalizeText(googleEvent.location);
 
-  // ✅ Log differences
+  // Log differences
   console.log("🔍 Comparing Events (ISO Normalized):", {
     isTitleDifferent,
     isStartDifferent,
@@ -557,11 +575,16 @@ function isEventDifferent(airtableEvent, googleEvent) {
     airtableStart,
     googleStart,
     airtableEnd,
-    googleEnd
+    googleEnd,
+    airtableDescription: airtableEvent.description,
+    googleDescription: googleEvent.description,
+    airtableLocation: airtableEvent.location,
+    googleLocation: googleEvent.location,
   });
 
   return isTitleDifferent || isStartDifferent || isEndDifferent || isDescriptionDifferent || isLocationDifferent;
 }
+
 
 
 async function updateGoogleCalendarEvent(eventId, title, start, end, calendarId, session) {
