@@ -400,11 +400,20 @@ async function populateGoogleCalendarWithAirtableRecords(
 ) {
   console.log(`Starting to populate Google Calendar "${calendarName}" with Airtable records...`);
 
-  const airtableEvents = await fetchUnprocessedEventsFromAirtable();
-  const totalFetchedRecords = airtableEvents.length;
+  if (isTerminated) {
+    console.log('🛑 Script is terminated. Skipping population.');
+    return;
+  }
 
+  const airtableEvents = await fetchUnprocessedEventsFromAirtable();
+  if (isTerminated) {
+    console.log("🛑 Script was terminated after fetching. Stopping processing.");
+    return;
+  }
+
+  const totalFetchedRecords = airtableEvents.length;
   if (totalFetchedRecords === 0) {
-    console.log(`No unprocessed events to sync for calendar "${calendarName}".`);
+    console.log(`✅ No unprocessed events to sync for calendar "${calendarName}".`);
     return;
   }
 
@@ -415,6 +424,11 @@ async function populateGoogleCalendarWithAirtableRecords(
   const processedRecordIds = new Set();
 
   for (const event of airtableEvents) {
+    if (isTerminated) {
+      console.log("🛑 Script was terminated. Stopping event processing.");
+      return;
+    }
+
     if (event.googleEventId || event.processed) {
       console.log(`Skipping event "${event.title}" - GoogleEventId or Processed status already set.`);
       noChange.push(event.title);
@@ -424,20 +438,23 @@ async function populateGoogleCalendarWithAirtableRecords(
 
     try {
       await lockAirtableRecord(event.id);
-
-      // Check if there's a duplicate or an existing event in Google Calendar
       let googleEventId = await checkForDuplicateEvent(event, calendarId, session);
+
+      if (isTerminated) {
+        console.log("🛑 Termination detected. Skipping event creation.");
+        return;
+      }
 
       if (googleEventId) {
         const googleEvent = await getGoogleCalendarEvent(googleEventId, calendarId, session);
 
-        // 🛑 **Ensure we completely skip updates if no changes exist**
+        // Skip updates if no changes exist
         if (!isEventDifferent(event, googleEvent)) {
           console.log(`✅ No changes detected for event "${event.title}". Skipping update.`);
           noChange.push(event.title);
           processedRecordIds.add(event.id);
           await unlockAirtableRecord(event.id);
-          continue;  // 🚀 Skip everything, including calling updateGoogleCalendarEvent
+          continue;
         }
 
         console.log(`⚠️ Updating event "${event.title}" as it has changed.`);
@@ -451,7 +468,7 @@ async function populateGoogleCalendarWithAirtableRecords(
         );
         await updateAirtableWithGoogleEventIdAndProcessed(event.id, googleEventId, true);
       } else {
-        console.log(`Creating new event: ${event.title}`);
+        console.log(`🆕 Creating new event: ${event.title}`);
         googleEventId = await createGoogleCalendarEvent(event, calendarId, session);
         if (googleEventId) {
           await updateAirtableWithGoogleEventIdAndProcessed(event.id, googleEventId, true);
@@ -464,21 +481,27 @@ async function populateGoogleCalendarWithAirtableRecords(
 
       processedRecordIds.add(event.id);
     } catch (error) {
-      console.error(`Error processing event "${event.title}":`, error);
+      console.error(`❌ Error processing event "${event.title}":`, error);
       failed.push(event.title);
     }
 
     await unlockAirtableRecord(event.id);
-    await sleep(12000);  // Delay to avoid hitting rate limits
+    await sleep(12000); // Delay to avoid hitting rate limits
+  }
+
+  if (isTerminated) {
+    console.log("🛑 All records processed but script was terminated.");
+    return;
   }
 
   setAddedRecords((prev) => [...prev, ...added]);
   setFailedRecords((prev) => [...prev, ...failed]);
   setNoChangeRecords(noChange);
 
-  console.log(`Total number of events created: ${createdEventsCount}`);
-  console.log(`Total number of records processed for calendar "${calendarName}": ${processedRecordIds.size}`);
+  console.log(`✅ Total number of events created: ${createdEventsCount}`);
+  console.log(`✅ Total number of records processed for calendar "${calendarName}": ${processedRecordIds.size}`);
 }
+
 
 
 
@@ -801,10 +824,19 @@ function CalendarSection({
 }
 
 async function removeDuplicateEvents(calendarId, session) {
+  if (isTerminated) {
+    console.log("🛑 Script is terminated. Skipping duplicate removal.");
+    return;
+  }
+
   console.log(`Checking for duplicate events in calendar: ${calendarId}...`);
 
   try {
     const events = await fetchGoogleCalendarEvents(calendarId, session);
+    if (isTerminated) {
+      console.log("🛑 Script was terminated after fetching events. Stopping processing.");
+      return;
+    }
 
     if (!events || events.length === 0) {
       console.log("No events found in calendar.");
@@ -815,36 +847,32 @@ async function removeDuplicateEvents(calendarId, session) {
     const duplicateEvents = [];
 
     events.forEach(event => {
+      if (isTerminated) {
+        console.log("🛑 Termination detected during duplicate search.");
+        return;
+      }
       const eventKey = `${event.summary.toLowerCase().trim()}_${new Date(event.start.dateTime || event.start.date).toISOString()}`;
 
       if (eventMap.has(eventKey)) {
-        duplicateEvents.push(event); // Store duplicates
+        duplicateEvents.push(event);
       } else {
         eventMap.set(eventKey, event);
       }
     });
 
-    // Log all detected duplicates
-    if (duplicateEvents.length > 0) {
-      console.log("🚨 Found duplicate events:", duplicateEvents.map(e => ({
-        title: e.summary,
-        start: e.start.dateTime || e.start.date,
-        id: e.id
-      })));
-    } else {
-      console.log("✅ No duplicate events found.");
-    }
-
-    // Remove duplicates
     for (const event of duplicateEvents) {
+      if (isTerminated) {
+        console.log("🛑 Termination detected. Stopping deletion process.");
+        return;
+      }
       await deleteGoogleCalendarEvent(event.id, calendarId, session);
       console.log(`🗑️ Deleted duplicate event: ${event.summary} (ID: ${event.id})`);
     }
-
   } catch (error) {
     console.error(`Error removing duplicate events for calendar ID "${calendarId}":`, error);
   }
 }
+
 
 
 
@@ -1107,7 +1135,11 @@ async function fetchAndProcessEvents() {
   let updatedCalendarEvents = {}; // To store the latest added events
 
   for (const [calendarName, calendarId] of Object.entries(calendarMap)) {
-    console.log(`📅 Processing events for calendar: ${calendarName}`);
+    if (isTerminated) {
+      console.log(`🛑 Script was terminated. Stopping further processing.`);
+      return; // ✅ Stop processing immediately
+    }
+        console.log(`📅 Processing events for calendar: ${calendarName}`);
 
     try {
       const airtableEvents = await fetchUnprocessedEventsFromAirtable();
