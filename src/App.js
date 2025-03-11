@@ -102,6 +102,7 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
     .filter(Boolean)
     .join(", ");
 
+
   // ✅ Create the event object
   const newEvent = {
     summary: event.title,
@@ -263,15 +264,22 @@ async function fetchUnprocessedEventsFromAirtable() {
           
           const data = await fetchWithRetry(url, options);
 
-      const records = data.records.map((record) => ({
-          id: record.id,
-          title: record.fields['Calendar Event Name'] || 'Untitled Event',
-          start: new Date(record.fields['FormattedStartDate']),
-          end: new Date(record.fields['FormattedEndDate']),
-          description: record.fields['description'] || '',
-          b: record.fields['b'] || '',  // ✅ Added the 'b' field here
-          processed: record.fields['Processed'] || false
-      }));
+          const records = data.records.map((record) => ({
+            id: record.id,
+            title: record.fields['Lot Number and Community/Neighborhood'] || 'No lot number',
+            start: new Date(record.fields['FormattedStartDate']),
+            end: new Date(record.fields['FormattedEndDate']),
+            description: record.fields['Description of Issue'] || '',
+            b: record.fields['b'] || '',  // ✅ Added the 'b' field here
+            processed: record.fields['Processed'] || false,
+            location: [
+                record.fields['Street Address'],
+                record.fields['City'],
+                record.fields['State'],
+                record.fields['Zip Code']
+            ].filter(Boolean).join(', ')  // ✅ Joins fields with a comma, removing any empty values
+        }));
+        
 
       console.log("Fetched unprocessed records:", records);
       
