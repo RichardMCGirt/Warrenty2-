@@ -1,14 +1,19 @@
 require('dotenv').config();
-const express = require('express');
 const { google } = require('googleapis');
-const cors = require('cors');
 const fs = require('fs');
 const fetch = require('node-fetch'); 
+const express = require("express");
+const axios = require("axios");
+const dotenv = require("dotenv");
+const cors = require("cors");
+
+dotenv.config();
 
 // ✅ Load Google OAuth credentials from environment variables
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const refreshToken = process.env.REFRESH_TOKEN;
+const PORT = process.env.PORT || 5001;
 
 const REDIRECT_URI = process.env.REDIRECT_URI || 'http://localhost:5001/oauth2callback';
 const app = express();
@@ -17,13 +22,48 @@ app.use(cors());
 
 const SCOPES = ['https://www.googleapis.com/auth/calendar'];
 const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
-
+let tokens = {
+    access_token: process.env.ACCESS_TOKEN,
+    refresh_token: process.env.REFRESH_TOKEN,
+    expiry_date: Date.now() + 3600 * 1000, // Set an expiry time
+  };
 
 app.get('/', (req, res) => {
     res.send('✅ Server is running and ready!');
 });
 
-
+app.get("/refresh-token", async (req, res) => {
+    try {
+      console.log("🔄 Refreshing Google Access Token...");
+  
+      if (!tokens.refresh_token) {
+        return res.status(400).json({ error: "No refresh token available" });
+      }
+  
+      const response = await axios.post("https://oauth2.googleapis.com/token", null, {
+        params: {
+          client_id: process.env.GOOGLE_CLIENT_ID,
+          client_secret: process.env.GOOGLE_CLIENT_SECRET,
+          refresh_token: tokens.refresh_token,
+          grant_type: "refresh_token",
+        },
+      });
+  
+      const newTokens = response.data;
+      newTokens.expiry_date = Date.now() + newTokens.expires_in * 1000; // Convert expiry time
+  
+      tokens.access_token = newTokens.access_token;
+      tokens.expiry_date = newTokens.expiry_date;
+  
+      console.log("✅ New Access Token:", newTokens.access_token);
+      
+      res.json({ accessToken: newTokens.access_token, expiresIn: newTokens.expires_in });
+    } catch (error) {
+      console.error("❌ Failed to refresh access token:", error.response?.data || error.message);
+      res.status(500).json({ error: "Failed to refresh access token" });
+    }
+  });
+  
 // 🔹 STEP 1: Generate the OAuth URL for user authentication
 app.get('/auth', (req, res) => {
     const authUrl = oauth2Client.generateAuthUrl({
@@ -300,7 +340,6 @@ app.post('/create-event', async (req, res) => {
 
 
 // 🔹 Start Server
-const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
     console.log(`✅ Server running on http://localhost:${PORT}`);
 });
