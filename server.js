@@ -143,21 +143,25 @@ app.get('/refresh-token', async (req, res) => {
             return res.status(401).json({ error: "Missing refresh token. Please log in again." });
         }
 
-        // Set credentials and refresh the token
         oauth2Client.setCredentials(tokens);
         const { credentials } = await oauth2Client.refreshAccessToken();
         oauth2Client.setCredentials(credentials);
-        
-        // Save the new tokens
-        saveTokens(credentials);
 
-        console.log("✅ New Access Token:", credentials.access_token);
+        saveTokens(credentials);
         res.json({ accessToken: credentials.access_token });
+
     } catch (error) {
         console.error("❌ Error refreshing token:", error);
-        res.status(500).json({ error: "Failed to refresh access token" });
+
+        // If refresh token is invalid, force the user to log in again
+        if (error.message.includes("invalid_grant")) {
+            res.status(401).json({ error: "Session expired. Please log in again." });
+        } else {
+            res.status(500).json({ error: "Failed to refresh access token" });
+        }
     }
 });
+
 
 // Function to save tokens
 function saveTokens(tokens) {
