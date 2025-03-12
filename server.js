@@ -8,6 +8,8 @@ const fetch = require('node-fetch');
 // ✅ Load Google OAuth credentials from environment variables
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const refreshToken = process.env.REFRESH_TOKEN;
+
 const REDIRECT_URI = process.env.REDIRECT_URI || 'http://localhost:5001/oauth2callback';
 const app = express();
 app.use(express.json());
@@ -34,22 +36,61 @@ app.get('/auth', (req, res) => {
     res.redirect(authUrl);
 });
 
-app.post('/refresh-token', async (req, res) => {
+app.post("/refresh-token", async (req, res) => {
+    console.log("🔄 Refresh token API hit at:", new Date().toISOString());
+  
     try {
-        if (!oauth2Client.credentials.refresh_token) {
-            return res.status(400).json({ error: "No refresh token available" });
-        }
-
-        const { credentials } = await oauth2Client.refreshAccessToken();
-        oauth2Client.setCredentials(credentials);
-
-        console.log("🔄 Access Token refreshed successfully");
-        res.json({ accessToken: credentials.access_token });
+      const refreshToken = process.env.REFRESH_TOKEN; 
+      const clientId = process.env.CLIENT_ID;
+      const clientSecret = process.env.CLIENT_SECRET;
+  
+      const tokenUrl = "https://oauth2.googleapis.com/token";
+      const params = new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+        grant_type: "refresh_token"
+      });
+  
+      console.log("🔄 Requesting new access token from Google...");
+  
+      const response = await fetch(tokenUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params,
+      });
+  
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error("❌ Failed to refresh token:", errorData);
+        return res.status(500).json({ error: errorData });
+      }
+  
+      const tokenData = await response.json();
+      console.log("✅ New access token received:", tokenData.access_token);
+  
+      // ✅ Update tokens.json
+      const fs = require("fs");
+      const tokens = {
+        access_token: tokenData.access_token,
+        refresh_token: refreshToken, // Keep the same refresh token
+        expires_in: tokenData.expires_in,
+        expiry_date: Date.now() + tokenData.expires_in * 1000
+      };
+  
+      fs.writeFileSync("tokens.json", JSON.stringify(tokens, null, 2));
+      console.log("✅ tokens.json updated successfully!");
+  
+      res.json({ accessToken: tokenData.access_token, expiresIn: tokenData.expires_in });
+  
     } catch (error) {
-        console.error("Error refreshing access token:", error);
-        res.status(500).json({ error: "Failed to refresh access token" });
+      console.error("❌ Error in refresh-token API:", error);
+      res.status(500).json({ error: "Internal Server Error" });
     }
-});
+  });
+  
+  
+  
 
 // 🔹 STEP 2: Handle OAuth Callback (Exchange Code for Tokens)
 app.get('/oauth2callback', async (req, res) => {
@@ -112,55 +153,44 @@ setInterval(async () => {
 
 async function refreshAccessToken() {
     try {
-        const tokens = loadTokens(); // Load saved tokens
+        const tokens = loadTokens();
         if (!tokens || !tokens.refresh_token) {
             console.error("❌ No refresh token available. User must log in again.");
             return null;
         }
 
-        console.log("🔄 Refreshing Access Token...");
-        const { credentials } = await oauth2Client.refreshAccessToken();
-        oauth2Client.setCredentials(credentials);
-        saveTokens(credentials); // Save new tokens
+        console.log("🔄 Checking if token needs to be refreshed...");
 
-        console.log("✅ New Access Token:", credentials.access_token);
-        return credentials.access_token;
+        const currentTime = Date.now();
+        if (tokens.expiry_date && tokens.expiry_date - currentTime > 300000) {  // 5 minutes before expiry
+            console.log("✅ Token is still valid, no need to refresh.");
+            return tokens.access_token;
+        }
+
+        console.log("🔄 Refreshing Access Token...");
+
+        const response = await axios.post("https://oauth2.googleapis.com/token", null, {
+            params: {
+                client_id: process.env.GOOGLE_CLIENT_ID,
+                client_secret: process.env.GOOGLE_CLIENT_SECRET,
+                refresh_token: tokens.refresh_token,
+                grant_type: "refresh_token",
+            },
+        });
+
+        const newTokens = response.data;
+        newTokens.expiry_date = Date.now() + newTokens.expires_in * 1000;
+
+        fs.writeFileSync("tokens.json", JSON.stringify(newTokens, null, 2));
+        console.log("✅ New Access Token:", newTokens.access_token);
+        
+        return newTokens.access_token;
     } catch (error) {
         console.error("❌ Token refresh failed:", error.message);
-        fs.unlinkSync('tokens.json'); // Delete invalid token file
-        console.log("🔗 Visit http://localhost:5001/auth to log in again.");
         return null;
     }
 }
 
-
-
-// 🔹 Refresh Access Token Endpoint
-app.get('/refresh-token', async (req, res) => {
-    try {
-        const tokens = loadTokens();
-        if (!tokens || !tokens.refresh_token) {
-            return res.status(401).json({ error: "Missing refresh token. Please log in again." });
-        }
-
-        oauth2Client.setCredentials(tokens);
-        const { credentials } = await oauth2Client.refreshAccessToken();
-        oauth2Client.setCredentials(credentials);
-
-        saveTokens(credentials);
-        res.json({ accessToken: credentials.access_token });
-
-    } catch (error) {
-        console.error("❌ Error refreshing token:", error);
-
-        // If refresh token is invalid, force the user to log in again
-        if (error.message.includes("invalid_grant")) {
-            res.status(401).json({ error: "Session expired. Please log in again." });
-        } else {
-            res.status(500).json({ error: "Failed to refresh access token" });
-        }
-    }
-});
 
 
 // Function to save tokens
@@ -171,6 +201,7 @@ function saveTokens(tokens) {
     fs.writeFileSync('tokens.json', JSON.stringify(tokens, null, 2));
     console.log("✅ Tokens saved successfully.");
 }
+
 
 
 // Function to load tokens (if they exist)
@@ -216,6 +247,7 @@ setInterval(async () => {
         console.warn("⚠️ No valid token found. User may need to log in.");
     }
 }, 45 * 60 * 1000);  // Run every 45 minutes
+
 
 async function createEvent(eventData, calendarId) {
     try {
