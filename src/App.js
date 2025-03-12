@@ -41,14 +41,18 @@ async function fetchGoogleCalendarEvents(calendarId) {
   try {
       // 🔄 Request a new token from the backend
       const tokenResponse = await fetch('http://localhost:5001/refresh-token', { 
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' }
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
       });
-
+      
       if (!tokenResponse.ok) throw new Error("Failed to refresh access token");
-
-      const { accessToken } = await tokenResponse.json();
-      console.log("🔍 Using refreshed Access Token for API call:", accessToken);
+      
+      const { accessToken, expiresIn } = await tokenResponse.json(); // Google returns `expires_in` (in seconds)
+      const expiryTime = Date.now() + expiresIn * 1000; // Convert to a timestamp
+      
+      localStorage.setItem("accessToken", accessToken);
+      localStorage.setItem("tokenExpiry", expiryTime);
+      
 
       // ✅ Construct API request
       const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${new Date().toISOString()}&maxResults=250&orderBy=startTime&singleEvents=true`;
@@ -71,6 +75,42 @@ async function fetchGoogleCalendarEvents(calendarId) {
       return [];
   }
 }
+
+
+async function getValidAccessToken() {
+  let accessToken = localStorage.getItem("accessToken");
+  let tokenExpiry = localStorage.getItem("tokenExpiry");
+
+  if (!accessToken || !tokenExpiry || Date.now() >= tokenExpiry) {
+    console.log("🔄 Access token expired. Requesting a refresh...");
+
+    try {
+      const tokenResponse = await fetch('http://localhost:5001/refresh-token', { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      if (!tokenResponse.ok) throw new Error("❌ Failed to refresh access token");
+
+      const { accessToken: newAccessToken, expiresIn } = await tokenResponse.json();
+      const newExpiryTime = Date.now() + expiresIn * 1000;
+
+      // ✅ Store the new token
+      localStorage.setItem("accessToken", newAccessToken);
+      localStorage.setItem("tokenExpiry", newExpiryTime);
+
+      console.log("✅ Token refreshed successfully:", newAccessToken);
+      return newAccessToken;
+    } catch (error) {
+      console.error("❌ Error refreshing token:", error);
+      return null;
+    }
+  }
+
+  console.log("✅ Using existing valid access token.");
+  return accessToken;
+}
+
 
 
 
@@ -315,9 +355,11 @@ async function fetchUnprocessedEventsFromAirtable() {
       console.log("Fetched unprocessed records:", records);
       
       if (records.length === 0) {
-          console.log('No unprocessed events found.');
-          isTerminated = true;
+        console.log('No unprocessed events found.');
+        // Do NOT set isTerminated to true, or reset it after a delay
+        setTimeout(() => { isTerminated = false; }, 60000); // Reset after 1 minute
       }
+      
       
       return records;
   } catch (error) {
@@ -886,10 +928,18 @@ function App() {
 
   function getTimeUntilNextQuarterHour() {
     const now = new Date();
-    const nextQuarterHour = new Date(now);
-    nextQuarterHour.setMinutes(Math.ceil(now.getMinutes() / 15) * 15, 0, 0);
-    return Math.max(0, Math.floor((nextQuarterHour - now) / 1000)); // Return remaining time in seconds
-  }
+    const nextTenMinuteMark = new Date(now);
+    
+    // Calculate the next 10-minute interval from the beginning of the hour
+    nextTenMinuteMark.setMinutes(Math.ceil(now.getMinutes() / 10) * 10, 0, 0);
+
+    // If we're already at the next 10-minute mark, move to the next one
+    if (nextTenMinuteMark <= now) {
+        nextTenMinuteMark.setMinutes(nextTenMinuteMark.getMinutes() + 10);
+    }
+
+    return Math.max(0, Math.floor((nextTenMinuteMark - now) / 1000)); // Return remaining time in seconds
+}
 
   const supabase = useSupabaseClient();
   const session = useSession();
@@ -916,48 +966,44 @@ function App() {
   }
   
   
-  async function fetchGoogleCalendarEvents(calendarId, session) {
-    console.log(`Fetching events from Google Calendar for calendar ID: ${calendarId}`);
-
+  async function fetchGoogleCalendarEvents(calendarId) {
+    console.log(`📅 Fetching events for Google Calendar: ${calendarId}`);
+  
     try {
-        // 🔄 Call your server to refresh the access token
-        const tokenResponse = await fetch(`${process.env.REACT_APP_API_URL}/refresh-token`, { method: 'POST' });
-        if (!tokenResponse.ok) throw new Error("Failed to refresh access token");
-
-        const { accessToken } = await tokenResponse.json();
-        console.log("🔍 Using refreshed Access Token for API call:", accessToken);
-
-        // ✅ Define the base API URL
-        const calendarApiUrl = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
-
-        // ✅ Get today's date in ISO format at midnight UTC
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const timeMin = today.toISOString(); // Filters out past events
-
-        // ✅ Construct the API URL with filtering for only future events
-        const url = `${calendarApiUrl}?timeMin=${encodeURIComponent(timeMin)}&maxResults=250&orderBy=startTime&singleEvents=true`;
-
-        console.log(`Fetching events from Google Calendar: ${url}`);
-
+        const accessToken = await getValidAccessToken();  // Log inside getValidAccessToken()
+        console.log("🔑 Using Access Token:", accessToken);
+  
+        if (!accessToken) {
+          console.error("❌ No valid access token available. Aborting API call.");
+          return [];
+        }
+  
+        const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${new Date().toISOString()}&maxResults=250&orderBy=startTime&singleEvents=true`;
+  
+        console.log(`🌍 Calling Google Calendar API: ${url}`);
+  
         const response = await fetch(url, {
             method: 'GET',
             headers: { Authorization: `Bearer ${accessToken}` },
         });
-
+  
         if (!response.ok) {
             const errorData = await response.json();
-            console.error('Failed to fetch Google Calendar events:', errorData);
+            console.error('❌ Failed to fetch Google Calendar events:', errorData);
             return [];
         }
-
+  
         const data = await response.json();
-        return data.items || []; // Return an empty array if no events are found
+        console.log(`✅ Successfully fetched ${data.items?.length || 0} events.`);
+        return data.items || []; 
+  
     } catch (error) {
-        console.error('Error fetching Google Calendar events:', error);
+        console.error('❌ Error fetching Google Calendar events:', error);
         return [];
     }
-}
+  }
+  
+  
 
   
   
@@ -1067,24 +1113,37 @@ console.log(`✅ Successfully updated Google Calendar event: ${title}`);
   useEffect(() => {
     const getTimeUntilNextQuarterHour = () => {
       const now = new Date();
-      const nextQuarterHour = new Date(now);
-      nextQuarterHour.setMinutes(Math.ceil(now.getMinutes() / 15) * 15, 0, 0);
-      return Math.max(0, Math.floor((nextQuarterHour - now) / 1000));
-    };
+      const nextTenMinuteMark = new Date(now);
+      
+      // Calculate the next 10-minute interval from the beginning of the hour
+      nextTenMinuteMark.setMinutes(Math.ceil(now.getMinutes() / 10) * 10, 0, 0);
   
+      // If we're already at the next 10-minute mark, move to the next one
+      if (nextTenMinuteMark <= now) {
+          nextTenMinuteMark.setMinutes(nextTenMinuteMark.getMinutes() + 10);
+      }
+  
+      return Math.max(0, Math.floor((nextTenMinuteMark - now) / 1000)); // Return remaining time in seconds
+  }
     const interval = setInterval(() => {
       const currentHour = new Date().getHours();
-      if (currentHour >= 7 && currentHour <= 17 && !isTerminated) {
+      if (currentHour >= 7 && currentHour <= 17) {
         const timeUntilNextSync = getTimeUntilNextQuarterHour();
         setCountdown(timeUntilNextSync);
-  
+    
         if (timeUntilNextSync === 0) {
-          fetchAndProcessEvents().then(() => {
-            setCountdown(getTimeUntilNextQuarterHour()); // Reset the countdown after syncing
-          });
+          fetchAndProcessEvents()
+            .then(() => {
+              setCountdown(getTimeUntilNextQuarterHour()); // Reset the countdown after syncing
+            })
+            .catch((error) => {
+              console.error("Error during scheduled sync:", error);
+              setCountdown(getTimeUntilNextQuarterHour()); // Keep running even after an error
+            });
         }
       }
     }, 1000);
+    
   
     return () => clearInterval(interval);
   }, [session]);
@@ -1092,145 +1151,144 @@ console.log(`✅ Successfully updated Google Calendar event: ${title}`);
 
   const handleLogin = async () => {
     try {
-        await supabase.auth.signInWithOAuth({
-            provider: 'google',
-            options: {
-                scopes: 'https://www.googleapis.com/auth/calendar',
-                redirectTo: window.location.origin,
-            },
-        });
+      await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          scopes: 'https://www.googleapis.com/auth/calendar',
+          redirectTo: window.location.origin,
+        },
+      });
     } catch (error) {
-        console.error('Error during login:', error);
+      console.error('Error during login:', error);
     }
-};
-
-const handleLogout = async () => {
-  try {
+  };
+  
+  const handleLogout = async () => {
+    try {
       const { error } = await supabase.auth.refreshSession();
       if (error) {
-          console.error('Error refreshing session:', error);
+        console.error('Error refreshing session:', error);
       }
       await supabase.auth.signOut();
       console.log('User logged out successfully.');
-  } catch (error) {
+    } catch (error) {
       console.error('Error during logout:', error);
-  }
-};
+    }
+  };
+  
 
 async function fetchAndProcessEvents() {
-  console.log("🚀 Fetching and processing events for all calendars...");
-
-  if (isTerminated) {
-    console.log("🛑 Script is terminated. Skipping event processing.");
-    return;
-  }
-
-  let allCalendarsProcessed = true;
-  let updatedCalendarEvents = {}; // To store the latest added events
-
-  for (const [calendarName, calendarId] of Object.entries(calendarMap)) {
+  try {
+    console.log("🚀 Fetching and processing events for all calendars...");
     if (isTerminated) {
-      console.log(`🛑 Script was terminated. Stopping further processing.`);
-      return; // ✅ Stop processing immediately
+      console.log("🛑 Script is terminated. Skipping event processing.");
+      return;
     }
-        console.log(`📅 Processing events for calendar: ${calendarName}`);
 
-    try {
-      const airtableEvents = await fetchUnprocessedEventsFromAirtable();
-      const filteredAirtableEvents = airtableEvents.filter(event =>
-        event.b?.toLowerCase().trim().replace(/\s+/g, '') === calendarName.toLowerCase().trim()
-      );
+    let allCalendarsProcessed = true;
+    let updatedCalendarEvents = {};
 
-      if (filteredAirtableEvents.length === 0) {
-        console.log(`✅ No unprocessed events found for ${calendarName}. Skipping.`);
-        continue;
+    for (const [calendarName, calendarId] of Object.entries(calendarMap)) {
+      if (isTerminated) {
+        console.log(`🛑 Script was terminated. Stopping further processing.`);
+        return;
       }
+      console.log(`📅 Processing events for calendar: ${calendarName}`);
 
-      console.log(`📊 Filtered ${filteredAirtableEvents.length} events from Airtable for calendar: ${calendarName}`);
-      const googleCalendarEvents = await fetchGoogleCalendarEvents(calendarId, session);
-      console.log(`📊 Fetched ${googleCalendarEvents.length} events from Google Calendar: ${calendarName}`);
+      try {
+        const airtableEvents = await fetchUnprocessedEventsFromAirtable();
+        const filteredAirtableEvents = airtableEvents.filter(
+          (event) => event.b?.toLowerCase().trim().replace(/\s+/g, "") === calendarName.toLowerCase().trim()
+        );
 
-      const googleEventMap = new Map();
-      googleCalendarEvents.forEach(event => {
-        googleEventMap.set(event.summary?.toLowerCase().trim(), event);
-      });
-
-      let addedEvents = [];
-
-      for (const airtableEvent of filteredAirtableEvents) {
-        // ✅ Validate event before proceeding
-        if (!airtableEvent.start || !airtableEvent.end) {
-          console.error(`❌ Skipping event "${airtableEvent.title}" due to missing start or end date.`);
+        if (filteredAirtableEvents.length === 0) {
+          console.log(`✅ No unprocessed events found for ${calendarName}. Skipping.`);
           continue;
         }
 
-        const eventTitle = airtableEvent.title.toLowerCase().trim();
-        const matchingGoogleEvent = googleEventMap.get(eventTitle);
+        console.log(`📊 Filtered ${filteredAirtableEvents.length} events from Airtable for calendar: ${calendarName}`);
+        const googleCalendarEvents = await fetchGoogleCalendarEvents(calendarId, session);
+        console.log(`📊 Fetched ${googleCalendarEvents.length} events from Google Calendar: ${calendarName}`);
 
-        if (matchingGoogleEvent) {
-          if (isEventDifferent(airtableEvent, matchingGoogleEvent)) {
-            console.log(`🔄 Updating event: ${airtableEvent.title}`);
-            await updateGoogleCalendarEvent(
-              matchingGoogleEvent.id,
-              airtableEvent.title,
-              airtableEvent.start,
-              airtableEvent.end,
-              calendarId,
-              session
-            );
-          } else {
-            console.log(`✅ No changes detected for event: ${airtableEvent.title}, skipping update.`);
+        const googleEventMap = new Map();
+        googleCalendarEvents.forEach((event) => {
+          googleEventMap.set(event.summary?.toLowerCase().trim(), event);
+        });
+
+        let addedEvents = [];
+
+        for (const airtableEvent of filteredAirtableEvents) {
+          if (!airtableEvent.start || !airtableEvent.end) {
+            console.error(`❌ Skipping event "${airtableEvent.title}" due to missing start or end date.`);
+            continue;
           }
-        } else {
-          console.log(`🆕 Creating new event: ${airtableEvent.title}`);
-          const googleEventId = await createGoogleCalendarEvent(airtableEvent, calendarId, session);
-          if (googleEventId) {
-            await updateAirtableWithGoogleEventIdAndProcessed(airtableEvent.id, googleEventId, true);
-            console.log(`✅ New event created and linked: ${airtableEvent.title}`);
 
-            // Add event details to the list
-            addedEvents.push({
-              title: airtableEvent.title,
-              start: airtableEvent.start,
-              end: airtableEvent.end
-            });
+          const eventTitle = airtableEvent.title.toLowerCase().trim();
+          const matchingGoogleEvent = googleEventMap.get(eventTitle);
+
+          if (matchingGoogleEvent) {
+            if (isEventDifferent(airtableEvent, matchingGoogleEvent)) {
+              console.log(`🔄 Updating event: ${airtableEvent.title}`);
+              await updateGoogleCalendarEvent(
+                matchingGoogleEvent.id,
+                airtableEvent.title,
+                airtableEvent.start,
+                airtableEvent.end,
+                calendarId,
+                session
+              );
+            } else {
+              console.log(`✅ No changes detected for event: ${airtableEvent.title}, skipping update.`);
+            }
+          } else {
+            console.log(`🆕 Creating new event: ${airtableEvent.title}`);
+            const googleEventId = await createGoogleCalendarEvent(airtableEvent, calendarId, session);
+            if (googleEventId) {
+              await updateAirtableWithGoogleEventIdAndProcessed(airtableEvent.id, googleEventId, true);
+              console.log(`✅ New event created and linked: ${airtableEvent.title}`);
+              addedEvents.push({
+                title: airtableEvent.title,
+                start: airtableEvent.start,
+                end: airtableEvent.end
+              });
+            }
           }
         }
+
+        updatedCalendarEvents[calendarName] = { added: addedEvents };
+
+        console.log(`✅ Finished processing events for calendar: ${calendarName}`);
+        await sleep(5000);
+      } catch (calendarError) {
+        console.error(`❌ Error processing events for calendar "${calendarName}":`, calendarError);
       }
-
-      // ✅ Store added events for this calendar
-      updatedCalendarEvents[calendarName] = { added: addedEvents };
-
-      console.log(`✅ Finished processing events for calendar: ${calendarName}`);
-      await sleep(5000);
-
-    } catch (error) {
-      console.error(`❌ Error processing events for calendar "${calendarName}":`, error);
     }
-  }
 
-  // ✅ Remove duplicate events after processing all calendars
-  for (const calendarId of Object.values(calendarMap)) {
-    try {
-      await removeDuplicateEvents(calendarId, session);
-    } catch (error) {
-      console.error(`❌ Error removing duplicate events for calendar ID "${calendarId}":`, error);
+    for (const calendarId of Object.values(calendarMap)) {
+      try {
+        await removeDuplicateEvents(calendarId, session);
+      } catch (error) {
+        console.error(`❌ Error removing duplicate events for calendar ID "${calendarId}":`, error);
+      }
     }
-  }
 
-  // ✅ Update state with newly added events
-  setCalendarEvents(prevEvents => ({
-    ...prevEvents,
-    ...updatedCalendarEvents
-  }));
-  
-  if (allCalendarsProcessed) {
-    console.log("✅ All events processed for all calendars. Terminating script.");
-    terminateScript();
-  } else {
-    console.log("⚠️ Some events still need processing, keeping script active.");
+    setCalendarEvents((prevEvents) => ({
+      ...prevEvents,
+      ...updatedCalendarEvents
+    }));
+
+    if (allCalendarsProcessed) {
+      console.log("✅ All events processed for all calendars. Terminating script.");
+      isTerminated = false; // Allow it to run again
+    } else {
+      console.log("⚠️ Some events still need processing, keeping script active.");
+    }
+  } catch (error) {
+    console.error("❌ Fatal error in fetchAndProcessEvents():", error);
+    isTerminated = false; // Ensure it runs again
   }
 }
+
 
 
 
