@@ -921,7 +921,7 @@ function App() {
 
     try {
         // 🔄 Call your server to refresh the access token
-        const tokenResponse = await fetch('/refresh-token', { method: 'POST' });
+        const tokenResponse = await fetch(`${process.env.REACT_APP_API_URL}/refresh-token`, { method: 'POST' });
         if (!tokenResponse.ok) throw new Error("Failed to refresh access token");
 
         const { accessToken } = await tokenResponse.json();
