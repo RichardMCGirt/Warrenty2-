@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import './App.css';
+
 import { useSession, useSupabaseClient} from '@supabase/auth-helpers-react';
 let isTerminated = false; // Initialize the variable early in the file
 let processedRecords = new Set(); // Store processed records to prevent duplicates
@@ -34,31 +35,45 @@ async function fetchWithRetry(url, options, retries = 3, delay = 10000) {
 }
 
 
-async function fetchGoogleCalendarEvents(calendarId, session) {
+async function fetchGoogleCalendarEvents(calendarId) {
   console.log(`Fetching events from Google Calendar for calendar ID: ${calendarId}`);
 
-  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
   try {
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${session.provider_token}`,
-        'Content-Type': 'application/json',
-      },
-    });
+      // 🔄 Request a new token from the backend
+      const tokenResponse = await fetch('http://localhost:5001/refresh-token', { 
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' }
+      });
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error('Failed to fetch Google Calendar events:', errorData);
-      return [];
-    }
+      if (!tokenResponse.ok) throw new Error("Failed to refresh access token");
 
-    const data = await response.json();
-    return data.items || []; // Return an empty array if no events are found
+      const { accessToken } = await tokenResponse.json();
+      console.log("🔍 Using refreshed Access Token for API call:", accessToken);
+
+      // ✅ Construct API request
+      const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${new Date().toISOString()}&maxResults=250&orderBy=startTime&singleEvents=true`;
+
+      const response = await fetch(url, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${accessToken}` },
+      });
+
+      if (!response.ok) {
+          const errorData = await response.json();
+          console.error('Failed to fetch Google Calendar events:', errorData);
+          return [];
+      }
+
+      const data = await response.json();
+      return data.items || []; // Return an empty array if no events are found
   } catch (error) {
-    console.error('Error fetching Google Calendar events:', error);
-    return [];
+      console.error('Error fetching Google Calendar events:', error);
+      return [];
   }
 }
+
+
+
 
 
 function terminateScript() {
@@ -98,13 +113,12 @@ async function createGoogleCalendarEvent(event, calendarId, session) {
   }
 
   // ✅ Ensure location is properly defined
-  // ✅ Ensure location is properly defined
-const location = [
-  event.streetAddress, 
-  event.city, 
-  event.state, 
-  event.zipCode
-].filter(Boolean).join(", ");
+  const location = [
+    event.streetAddress, 
+    event.city, 
+    event.state, 
+    event.zipCode
+  ].filter(Boolean).join(", ");
 
 // ✅ Log the extracted location before creating the event
 console.log(`📌 Location extracted for event "${event.title}":`, location);
@@ -117,7 +131,7 @@ console.log("🔍 Event Object Before Google Calendar Creation:", event);
     description: event.description || "No description provided",
     start: { dateTime: startDate, timeZone: "America/Toronto" },
     end: { dateTime: endDate, timeZone: "America/Toronto" },
-    location: event.location || "Unknown Location", // ✅ Ensure it comes from the fetched event
+    location: location || "Unknown Location", // ✅ Ensures proper location formatting
 };
 
 
@@ -521,68 +535,19 @@ async function populateGoogleCalendarWithAirtableRecords(
 
 function isEventDifferent(airtableEvent, googleEvent) {
   if (!airtableEvent || !googleEvent || !googleEvent.start || !googleEvent.end) {
-    console.error('❌ Missing required event data:', { airtableEvent, googleEvent });
-    return true; // Consider it different if any required data is missing
+      console.error('❌ Missing event data:', { airtableEvent, googleEvent });
+      return true; 
   }
 
-  // Function to safely convert date strings to ISO format
-  function safeNormalizeToISO(dateStr) {
-    if (!dateStr) return null;
-    
-    let date = new Date(dateStr);
-    if (isNaN(date.getTime())) {
-      console.error(`❌ Invalid Date: ${dateStr}`);
-      return null;
-    }
+  const normalizeText = (text) => (text || "").trim().toLowerCase();
+  
+  return (
+      normalizeText(airtableEvent.title) !== normalizeText(googleEvent.summary) ||
+      normalizeText(airtableEvent.location) !== normalizeText(googleEvent.location) ||
+      new Date(airtableEvent.start).toISOString() !== googleEvent.start.dateTime ||
+      new Date(airtableEvent.end).toISOString() !== googleEvent.end.dateTime
+  );
 
-    return date.toISOString(); // Converts to strict "YYYY-MM-DDTHH:mm:ss.sssZ"
-  }
-
-  // Convert both Google and Airtable dates safely
-  const googleStart = safeNormalizeToISO(googleEvent.start.dateTime || googleEvent.start.date);
-  const googleEnd = safeNormalizeToISO(googleEvent.end.dateTime || googleEvent.end.date);
-  const airtableStart = safeNormalizeToISO(airtableEvent.start);
-  const airtableEnd = safeNormalizeToISO(airtableEvent.end);
-
-  // Check if any date conversion failed
-  if (!googleStart || !googleEnd || !airtableStart || !airtableEnd) {
-    console.error("❌ One or more event dates are invalid:", {
-      airtableStart, airtableEnd, googleStart, googleEnd,
-      airtableEvent, googleEvent
-    });
-    return true; // Treat as different if any date is invalid
-  }
-
-  // Normalize text for comparison (trim, lowercase, remove extra spaces)
-  function normalizeText(text) {
-    return (text || "").trim().replace(/\s+/g, " ").toLowerCase();
-  }
-
-  // Compare event fields safely
-  const isTitleDifferent = normalizeText(airtableEvent.title) !== normalizeText(googleEvent.summary);
-  const isStartDifferent = airtableStart !== googleStart;
-  const isEndDifferent = airtableEnd !== googleEnd;
-  const isDescriptionDifferent = normalizeText(airtableEvent.description) !== normalizeText(googleEvent.description);
-  const isLocationDifferent = normalizeText(airtableEvent.location) !== normalizeText(googleEvent.location);
-
-  // Log differences
-  console.log("🔍 Comparing Events (ISO Normalized):", {
-    isTitleDifferent,
-    isStartDifferent,
-    isEndDifferent,
-    isDescriptionDifferent,
-    isLocationDifferent,
-    airtableStart,
-    googleStart,
-    airtableEnd,
-    googleEnd,
-    airtableDescription: airtableEvent.description,
-    googleDescription: googleEvent.description,
-    airtableLocation: airtableEvent.location,
-    googleLocation: googleEvent.location,
-  });
-
-  return isTitleDifferent || isStartDifferent || isEndDifferent || isDescriptionDifferent || isLocationDifferent;
 }
 
 
@@ -909,11 +874,11 @@ function App() {
   const calendarMap = {
     Savannah: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
     Charleston: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com',
-      Greensboro: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com',
-     MyrtleBeach: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com',
-     Wilmington: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com',
-   Grenville: 'c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf@group.calendar.google.com',
-     Columbia: 'c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515@group.calendar.google.com',
+     Greensboro: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com',
+    MyrtleBeach: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com',
+    Wilmington: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com',
+  Grenville: 'c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf@group.calendar.google.com',
+    Columbia: 'c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515@group.calendar.google.com',
        Raleigh: 'warranty@vanirinstalledsales.com',
   };
 
@@ -953,41 +918,47 @@ function App() {
   
   async function fetchGoogleCalendarEvents(calendarId, session) {
     console.log(`Fetching events from Google Calendar for calendar ID: ${calendarId}`);
-  
-    // ✅ Define the base API URL
-    const calendarApiUrl = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
-  
-    // ✅ Get today's date in ISO format at midnight UTC
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const timeMin = today.toISOString(); // Filters out past events
-  
-    // ✅ Construct the API URL with filtering for only future events
-    const url = `${calendarApiUrl}?timeMin=${encodeURIComponent(timeMin)}&maxResults=250&orderBy=startTime&singleEvents=true`;
-  
-    console.log(`Fetching events from Google Calendar: ${url}`);
-  
+
     try {
-      const response = await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${session.provider_token}`,
-          'Content-Type': 'application/json',
-        },
-      });
-  
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error('Failed to fetch Google Calendar events:', errorData);
-        return [];
-      }
-  
-      const data = await response.json();
-      return data.items || []; // Return an empty array if no events are found
+        // 🔄 Call your server to refresh the access token
+        const tokenResponse = await fetch('/refresh-token', { method: 'POST' });
+        if (!tokenResponse.ok) throw new Error("Failed to refresh access token");
+
+        const { accessToken } = await tokenResponse.json();
+        console.log("🔍 Using refreshed Access Token for API call:", accessToken);
+
+        // ✅ Define the base API URL
+        const calendarApiUrl = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
+
+        // ✅ Get today's date in ISO format at midnight UTC
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const timeMin = today.toISOString(); // Filters out past events
+
+        // ✅ Construct the API URL with filtering for only future events
+        const url = `${calendarApiUrl}?timeMin=${encodeURIComponent(timeMin)}&maxResults=250&orderBy=startTime&singleEvents=true`;
+
+        console.log(`Fetching events from Google Calendar: ${url}`);
+
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            console.error('Failed to fetch Google Calendar events:', errorData);
+            return [];
+        }
+
+        const data = await response.json();
+        return data.items || []; // Return an empty array if no events are found
     } catch (error) {
-      console.error('Error fetching Google Calendar events:', error);
-      return [];
+        console.error('Error fetching Google Calendar events:', error);
+        return [];
     }
-  }
+}
+
   
   
   
@@ -1343,5 +1314,3 @@ return (
 }
 
 export default App;
-
-
