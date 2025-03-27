@@ -11,10 +11,10 @@ module.exports = { loadTokens, refreshAccessToken, saveTokens };
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const PORT = process.env.PORT || 5001;
-const REDIRECT_URI = process.env.REDIRECT_URI || 'http://localhost:5001/oauth2callback';
+const REDIRECT_URI = process.env.REDIRECT_URI || 'https://warrentycalender.vanirinstalledsales.info//oauth2callback';
 
 const app = express();
-app.use(cors({ origin: ["http://localhost:3000", "http://localhost:3001"] })); // Allow multiple origins
+app.use(cors({ origin: ["https://warrentycalender.vanirinstalledsales.info", "http://localhost:3001"] })); // Allow multiple origins
 
 app.use(express.json());
 app.use(express.json());  // Make sure you can parse JSON requests
@@ -47,8 +47,10 @@ if (tokens) {
 }
 
 const allowedOrigins = [
-    process.env.CLIENT_ORIGIN || "http://localhost:3001", // Frontend domain
+    "http://localhost:3001",
+    "https://warrentycalender.vanirinstalledsales.info"
   ];
+  
   
   app.use(cors({
     origin: function (origin, callback) {
@@ -156,7 +158,6 @@ async function refreshAccessToken() {
 }
 
 
-app.use(cors({ origin: "http://localhost:3001" }));
 
 // 🔹 STEP 1: Google OAuth Authentication URL
 app.get('/auth', (req, res) => {
@@ -247,35 +248,7 @@ app.get('/api/tokens', (req, res) => {
     }
 });
 
-app.post("/api/refresh-token", async (req, res) => {
-    try {
-        console.log("🔄 Received request to refresh token...");
-        
-        const tokens = loadTokens();
-        if (!tokens || !tokens.refresh_token) {
-            return res.status(400).json({ error: "No refresh token available." });
-        }
 
-        const response = await axios.post("https://oauth2.googleapis.com/token", null, {
-            params: {
-                client_id: CLIENT_ID,
-                client_secret: CLIENT_SECRET,
-                refresh_token: tokens.refresh_token,
-                grant_type: "refresh_token",
-            },
-        });
-
-        const newTokens = response.data;
-        newTokens.refresh_token = tokens.refresh_token; // Keep the old refresh token
-        saveTokens(newTokens);
-        
-        console.log("✅ Token refreshed successfully:", newTokens.access_token);
-        res.json({ access_token: newTokens.access_token, expires_in: newTokens.expires_in });
-    } catch (error) {
-        console.error("❌ Error refreshing token:", error.response?.data || error.message);
-        res.status(500).json({ error: "Failed to refresh token" });
-    }
-});
 
 
 

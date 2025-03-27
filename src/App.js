@@ -76,36 +76,51 @@ async function fetchGoogleCalendarEvents(calendarId) {
   }
 }
 
-async function refreshAccessToken() {
+async function tryFetchServer(url, options = {}, timeout = 3000) {
   try {
-      console.log("🔄 Refreshing access token...");
-
-      const response = await fetch("http://localhost:5001/api/refresh-token", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-      });
-
-      if (!response.ok) {
-          throw new Error(`HTTP error! Status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      if (data.access_token) {
-          console.log("✅ New Access Token:", data.access_token);
-
-          // Store new token & expiry time
-          localStorage.setItem("accessToken", data.access_token);
-          localStorage.setItem("tokenExpiry", (Date.now() + data.expires_in * 1000).toString());
-
-          return data.access_token;
-      } else {
-          throw new Error("No access token returned");
-      }
-  } catch (error) {
-      console.error("❌ Failed to refresh token:", error);
-      return null;
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    clearTimeout(id);
+    return response;
+  } catch (err) {
+    console.warn(`⚠️ Skipping server call (${url}) - server might not be running.`);
+    return null;
   }
 }
+
+
+async function refreshAccessToken() {
+  try {
+    console.log("🔄 Trying to refresh access token...");
+
+    const response = await tryFetchServer("http://localhost:5001/api/refresh-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (!response || !response.ok) {
+      throw new Error("Server not available or token refresh failed");
+    }
+
+    const data = await response.json();
+
+    if (data.access_token) {
+      localStorage.setItem("accessToken", data.access_token);
+      localStorage.setItem("tokenExpiry", (Date.now() + data.expires_in * 1000).toString());
+      return data.access_token;
+    }
+
+    throw new Error("No access token returned");
+  } catch (error) {
+    console.warn("⚠️ Failed to refresh via server, fallback to existing token.");
+    return localStorage.getItem("accessToken") || null;
+  }
+}
+
 
 
 async function getValidAccessToken() {
@@ -672,54 +687,63 @@ async function updateGoogleCalendarEvent(eventId, title, start, end, calendarId)
   }
 }
 
+async function getAnyValidAccessToken(session) {
+  let accessToken = session?.provider_token || localStorage.getItem("accessToken");
+
+  if (!accessToken) {
+    try {
+      const tokenResponse = await fetch('http://localhost:5001/api/tokens');
+      if (tokenResponse.ok) {
+        const tokens = await tokenResponse.json();
+        accessToken = tokens.access_token;
+        console.log("✅ Token fetched from backend.");
+      } else {
+        console.warn("⚠️ Could not retrieve token from backend.");
+      }
+    } catch (error) {
+      console.warn("⚠️ Backend unavailable for token fetch:", error.message);
+    }
+  }
+
+  if (!accessToken) {
+    console.error("❌ No access token available.");
+  }
+
+  return accessToken;
+}
 
 
 async function getGoogleCalendarEvent(eventId, calendarId, session) {
-  // Fetch the token from the backend
-  const tokenResponse = await fetch('http://localhost:5001/api/tokens');
-  
-  if (!tokenResponse.ok) {
-    console.error("Failed to fetch token");
-    return null;
-  }
-
-  const tokens = await tokenResponse.json();
-  const accessToken = tokens.access_token;
+  const accessToken = await getAnyValidAccessToken(session);
+  if (!accessToken) return null;
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
+
   try {
     const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
+      headers: { Authorization: `Bearer ${accessToken}` },
     });
 
     if (!response.ok) {
-      console.error(`Failed to fetch event from Google Calendar: ${eventId}`);
+      console.error(`❌ Failed to fetch event from Google Calendar (${response.status})`);
       return null;
     }
 
-    const data = await response.json();
-    return data;
+    return await response.json();
   } catch (error) {
-    console.error('Error fetching Google Calendar event:', error);
+    console.error('❌ Error fetching Google Calendar event:', error);
     return null;
   }
 }
 
 
 
-async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
-  // Fetch the token from the backend
-  const tokenResponse = await fetch('http://localhost:5001/api/tokens');
-  
-  if (!tokenResponse.ok) {
-    console.error("Failed to fetch token");
-    return false;
-  }
 
-  const tokens = await tokenResponse.json();
-  const accessToken = tokens.access_token;
+
+
+async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
+  const accessToken = await getAnyValidAccessToken(session);
+  if (!accessToken) return false;
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
 
@@ -727,14 +751,14 @@ async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
     const response = await fetch(url, {
       method: 'DELETE',
       headers: {
-        Authorization: `Bearer ${accessToken}`,  // Use the fetched access token
+        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
     });
 
     if (response.status === 410) {
       console.warn(`Event ${eventId} already deleted (410 Gone). Skipping.`);
-      return true; // consider it a success since it's already gone
+      return true;
     }
 
     if (!response.ok) {
@@ -750,6 +774,8 @@ async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
     return false;
   }
 }
+
+
 
 async function removeDuplicateEvents(calendarId, session) {
   if (isTerminated) {
@@ -801,6 +827,8 @@ async function removeDuplicateEvents(calendarId, session) {
   }
 }
 
+
+
 function formatCountdown(seconds) {
   const minutes = Math.floor(seconds / 60);
   const secs = seconds % 60;
@@ -819,6 +847,36 @@ function App() {
        Raleigh: 'warranty@vanirinstalledsales.com',
        Charlotte: 'c_424688691b4dace071516f7adb111ca9e74a5b290f11d33912bacfa933477bcc@group.calendar.google.com',
   };
+
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash && hash.includes("access_token")) {
+      const params = new URLSearchParams(hash.substring(1));
+      const token = params.get("access_token");
+  
+      if (token) {
+        localStorage.setItem("accessToken", token);
+        fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        })
+          .then((res) => res.json())
+          .then((userInfo) => {
+            const email = userInfo.email;
+            if (email.endsWith("@vanirinstalledsales.com")) {
+              console.log("✅ Logged in:", email);
+              localStorage.setItem("userEmail", email);
+              // Proceed with rest of your app logic
+            } else {
+              alert("❌ Unauthorized. You must use a @vanirinstalledsales.com account.");
+              localStorage.removeItem("accessToken");
+            }
+          });
+      }
+    }
+  }, []);
+  
 
   // ✅ Automatically refresh token every 55 minutes
 useEffect(() => {
@@ -848,11 +906,11 @@ useEffect(() => {
     const nextTenMinuteMark = new Date(now);
     
     // Calculate the next 10-minute interval from the beginning of the hour
-    nextTenMinuteMark.setMinutes(Math.ceil(now.getMinutes() / 10) * 10, 0, 0);
+    nextTenMinuteMark.setMinutes(Math.ceil(now.getMinutes() / 5) * 5, 0, 0);
 
     // If we're already at the next 10-minute mark, move to the next one
     if (nextTenMinuteMark <= now) {
-        nextTenMinuteMark.setMinutes(nextTenMinuteMark.getMinutes() + 10);
+        nextTenMinuteMark.setMinutes(nextTenMinuteMark.getMinutes() + 5);
     }
 
     return Math.max(0, Math.floor((nextTenMinuteMark - now) / 1000)); // Return remaining time in seconds
@@ -883,60 +941,67 @@ useEffect(() => {
   }
   
   
-  async function fetchGoogleCalendarEvents(calendarId) {
-    let accessToken = await getValidAccessToken(); // Get a valid token from storage or refresh
-
-    if (!accessToken) {
-        console.error("❌ No valid access token available. Aborting fetch.");
-        return [];
-    }
-
-    console.log("📅 Fetching Google Calendar events with token:", accessToken);
-
+  async function fetchGoogleCalendarEvents(calendarId, session) {
+    const accessToken = await getAnyValidAccessToken(session);
+    if (!accessToken) return [];
+  
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+  
+    const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${startOfToday.toISOString()}&maxResults=250&orderBy=startTime&singleEvents=true`;
+  
     try {
-      const startOfToday = new Date();
-startOfToday.setHours(0, 0, 0, 0);
-        const response = await fetch(
-            `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${startOfToday.toISOString()}&maxResults=250&orderBy=startTime&singleEvents=true`,
-            {
-                method: "GET",
-                headers: {
-                    "Authorization": `Bearer ${accessToken}`,
-                    "Content-Type": "application/json",
-                },
-            }
-        );
-
-        if (!response.ok) {
-            const errorResponse = await response.json();
-
-            if (errorResponse.error.code === 401) {
-                console.warn("🔄 Access token expired. Attempting to refresh...");
-
-                // Refresh the token and retry once
-                const newAccessToken = await refreshAccessToken();
-                if (newAccessToken) {
-                    console.log("🔄 Retrying event fetch with new token...");
-                    return await fetchGoogleCalendarEvents(calendarId); // Recursive retry
-                } else {
-                    console.error("❌ Failed to refresh token. User may need to re-authenticate.");
-                    return [];
-                }
-            }
-
-            console.error("❌ Google Calendar API Error:", errorResponse);
-            throw new Error(errorResponse.error.message);
-        }
-
-        const data = await response.json();
-        console.log(`✅ Successfully fetched ${data.items.length} events.`);
-        return data.items || []; // Ensure an empty array is returned if no events exist
-    } catch (error) {
-        console.error("❌ Failed to fetch Google Calendar events:", error.message);
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+  
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error('❌ Failed to fetch events from Google Calendar:', errorData);
         return [];
+      }
+  
+      const data = await response.json();
+      console.log(`✅ Fetched ${data.items?.length || 0} events from Google Calendar.`);
+      return data.items || [];
+    } catch (error) {
+      console.error('❌ Error fetching Google Calendar events:', error.message);
+      return [];
     }
-}
+  }
+  
+  
+  async function getAnyValidAccessToken(session) {
+    let accessToken = session?.provider_token || localStorage.getItem("accessToken");
+  
+    // Try to fallback to backend if not available
+    if (!accessToken) {
+      try {
+        const tokenResponse = await fetch('http://localhost:5001/api/tokens');
+        if (tokenResponse.ok) {
+          const tokens = await tokenResponse.json();
+          accessToken = tokens.access_token;
+          console.log("✅ Token fetched from backend.");
+        } else {
+          console.warn("⚠️ Could not retrieve token from backend.");
+        }
+      } catch (error) {
+        console.warn("⚠️ Backend unavailable for token fetch:", error.message);
+      }
+    }
+  
+    if (!accessToken) {
+      console.error("❌ No access token available.");
+    }
+  
+    return accessToken;
+  }
 
+  
   async function updateGoogleCalendarEvent(eventId, title, start, end, calendarId) {
     try {
         const accessToken = await getValidAccessToken();
@@ -1025,20 +1090,20 @@ startOfToday.setHours(0, 0, 0, 0);
 }
 async function fetchWithRetry(url, options, retries = 3, delay = 2000) {
   for (let attempt = 1; attempt <= retries; attempt++) {
-      try {
-          const response = await fetch(url, options);
-          if (response.ok) return response;
+    try {
+      const response = await fetch(url, options);
+      if (response.ok) return response;
 
-          console.warn(`⚠️ API call failed (Attempt ${attempt}/${retries}): ${response.statusText}`);
-          if (response.status === 429) {
-              console.log("⏳ Rate limit hit. Retrying after delay...");
-              await new Promise(resolve => setTimeout(resolve, delay));
-          } else {
-              return null; // Stop retrying on other errors
-          }
-      } catch (error) {
-          console.error("❌ API request error:", error);
+      console.warn(`⚠️ API call failed (Attempt ${attempt}/${retries}): ${response.statusText}`);
+      if (response.status === 429) {
+        console.log("⏳ Rate limit hit. Retrying after delay...");
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        return null;
       }
+    } catch (error) {
+      console.error("❌ API request error:", error);
+    }
   }
   return null;
 }
@@ -1050,11 +1115,11 @@ useEffect(() => {
         const nextSyncTime = new Date(now);
 
         // Calculate the next 10-minute interval from the beginning of the hour
-        nextSyncTime.setMinutes(Math.ceil(now.getMinutes() / 10) * 10, 0, 0);
+        nextSyncTime.setMinutes(Math.ceil(now.getMinutes() / 5) * 5, 0, 0);
 
         // If we're already at the next 10-minute mark, move to the next one
         if (nextSyncTime <= now) {
-            nextSyncTime.setMinutes(nextSyncTime.getMinutes() + 10);
+            nextSyncTime.setMinutes(nextSyncTime.getMinutes() + 5);
         }
 
         return Math.max(0, Math.floor((nextSyncTime - now) / 1000)); // Return remaining time in seconds
@@ -1114,7 +1179,7 @@ async function handleLogin() {
 
 async function saveTokensToBackend(tokens) {
   try {
-      const response = await fetch("http://localhost:5001/save-tokens", {
+    const response = await tryFetchServer("http://localhost:5001/api/refresh-token", {
           method: "POST",
           headers: {
               "Content-Type": "application/json",
@@ -1152,6 +1217,20 @@ async function handleAuthSuccess(session) {
 }
 
 
+function LoginButton() {
+  const login = () => {
+    const CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID";
+    const REDIRECT_URI = window.location.origin;
+    const SCOPE = "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.email";
+    const RESPONSE_TYPE = "token";
+
+    const googleLoginUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=${RESPONSE_TYPE}&scope=${SCOPE}&include_granted_scopes=true`;
+
+    window.location.href = googleLoginUrl;
+  };
+
+  return <button onClick={login}>Sign in with Google</button>;
+}
 
   
   const handleLogout = async () => {
@@ -1298,14 +1377,30 @@ return (
   <div className="App" style={{ padding: '20px', fontFamily: 'Arial, sans-serif' }}>
     <h1>Google Calendar Sync</h1>
 
+    {/* 🔐 Google Sign In */}
+    <button
+      onClick={() => {
+        const CLIENT_ID = '882687108659-vqkr605rdsgesl5h348l07o0um11rjjg.apps.googleusercontent.com';
+        const REDIRECT_URI = window.location.origin;
+        const SCOPE = 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.email';
+        const RESPONSE_TYPE = 'token';
+
+        const googleLoginUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=${RESPONSE_TYPE}&scope=${SCOPE}&include_granted_scopes=true`;
+
+        window.location.href = googleLoginUrl;
+      }}
+      style={{ marginBottom: '20px', padding: '10px 20px', fontSize: '16px' }}
+    >
+      Sign in with Google
+    </button>
+
     <p>Next sync in: {formatCountdown(countdown)}</p>
 
-    {/* Sync button always visible now */}
     <button onClick={fetchAndProcessEvents} style={{ margin: '10px 0' }}>
       Sync Now
     </button>
 
-    {/* Display calendar names and events */}
+    {/* Calendar Display */}
     <div
       className="calendar-grid"
       style={{
@@ -1376,6 +1471,7 @@ return (
     </div>
   </div>
 );
+
 
 
 }
