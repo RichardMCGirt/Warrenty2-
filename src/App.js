@@ -1412,7 +1412,7 @@ return (
 
     <p>Next sync in: {formatCountdown(countdown)}</p>
     {!hasToken && (
-  <p style={{ color: 'gray' }}>🔒 Please sign in with a Vanir account to sync events.</p>
+  <p style={{ color: 'gray' }}>🔒 Please sign in with a Vanir account to create events.</p>
 )}
 
     {hasToken && (
