@@ -10,6 +10,7 @@ function normalizeDateTime(dateStr) {
 }
 
 
+
 async function fetchWithRetry(url, options, retries = 3, delay = 10000) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -32,6 +33,7 @@ async function fetchWithRetry(url, options, retries = 3, delay = 10000) {
   console.error("Max retries reached. API request failed.");
   return null;
 }
+
 
 
 async function fetchGoogleCalendarEvents(calendarId) {
@@ -66,8 +68,10 @@ async function fetchGoogleCalendarEvents(calendarId) {
           return [];
       }
 
+      console.log("🛰️ Refresh token response status:", response.status);
       const data = await response.json();
-      console.log(`✅ Successfully fetched ${data.items?.length || 0} events.`);
+      console.log("🔑 Token data from backend:", data);
+            console.log(`✅ Successfully fetched ${data.items?.length || 0} events.`);
       return data.items || [];
 
   } catch (error) {
@@ -102,29 +106,25 @@ const tryFetchServer = async (url = "http://localhost:5001/api/refresh-token", o
 async function refreshAccessToken() {
   try {
     console.log("🔄 Trying to refresh access token...");
-
     const response = await tryFetchServer("http://localhost:5001/api/refresh-token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     });
-
-    // 🔽 Add this line here
     if (!response) {
       console.info("ℹ️ Running in client-only mode. Using local token.");
     }
-
     if (response) {
+      console.log("🛰️ Refresh token response status:", response.status);
       const data = await response.json();
+      console.log("🔑 Token data from backend:", data);
       if (data.access_token) {
         localStorage.setItem("accessToken", data.access_token);
         localStorage.setItem("tokenExpiry", (Date.now() + data.expires_in * 1000).toString());
         return data.access_token;
       }
     }
-
     console.warn("⚠️ Server not available or token not refreshed.");
     return localStorage.getItem("accessToken") || null;
-
   } catch (error) {
     console.warn("⚠️ Refresh attempt failed. Falling back to existing token.");
     return localStorage.getItem("accessToken") || null;
@@ -137,26 +137,40 @@ async function refreshAccessToken() {
 
 let refreshFailedAt = 0;
 
+function isAccessTokenValid() {
+  const token = localStorage.getItem("accessToken");
+  const expiry = localStorage.getItem("tokenExpiry");
+  const now = Date.now();
+  const buffer = 5 * 60 * 1000;
+  return token && expiry && parseInt(expiry) - now > buffer;
+}
+
+
 async function getValidAccessToken() {
   const now = Date.now();
-
-  // Don’t retry for 3 minutes if the last attempt failed
+  if (isAccessTokenValid()) {
+    console.log("✅ Token is still valid.");
+    return localStorage.getItem("accessToken");
+  }
   if (now - refreshFailedAt < 3 * 60 * 1000) {
     console.warn("⏱️ Skipping refresh — recently failed.");
     return localStorage.getItem("accessToken");
   }
-
   try {
     console.log("🔄 Trying to refresh access token...");
-    await refreshAccessToken(); // your existing logic
-    refreshFailedAt = 0; // success resets failure timer
+    const refreshedToken = await refreshAccessToken();
+    if (refreshedToken) {
+      refreshFailedAt = 0;
+      return refreshedToken;
+    }
   } catch (err) {
     refreshFailedAt = now;
-    console.warn("⚠️ Failed to refresh via server. Fallback to existing token.");
+    console.warn("⚠️ Failed to refresh token, fallback to last known one.");
   }
-
   return localStorage.getItem("accessToken");
 }
+
+
 
 
 
@@ -1017,8 +1031,10 @@ function App() {
         return [];
       }
   
+      console.log("🛰️ Refresh token response status:", response.status);
       const data = await response.json();
-      console.log(`✅ Fetched ${data.items?.length || 0} events from Google Calendar.`);
+      console.log("🔑 Token data from backend:", data);
+            console.log(`✅ Fetched ${data.items?.length || 0} events from Google Calendar.`);
       return data.items || [];
     } catch (error) {
       console.error('❌ Error fetching Google Calendar events:', error.message);

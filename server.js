@@ -14,13 +14,33 @@ const PORT = process.env.PORT || 5001;
 const REDIRECT_URI = process.env.REDIRECT_URI || 'https://warrentycalender.vanirinstalledsales.info//oauth2callback';
 
 const app = express();
-app.use(cors({ origin: ["https://warrentycalender.vanirinstalledsales.info", "http://localhost:3001"] })); // Allow multiple origins
 
-app.use(express.json());
 app.use(express.json());  // Make sure you can parse JSON requests
 
 // Set up OAuth2 client
 const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
+
+const corsOptions = {
+    origin: function (origin, callback) {
+      const allowedOrigins = [
+        'https://warrentycalender.vanirinstalledsales.info',
+        'http://localhost:3001'
+      ];
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('❌ Not allowed by CORS'));
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'OPTIONS', 'PUT', 'PATCH', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  };
+  
+  app.use(cors(corsOptions));
+  app.options('*', cors(corsOptions)); // 🔥 Handle preflight requests globally
+  
+  
 
 // ✅ Load stored tokens when the server starts
 function loadTokens() {
@@ -46,26 +66,8 @@ if (tokens) {
     console.log("⚠️ No existing tokens found. User must authenticate.");
 }
 
-const allowedOrigins = [
-    "http://localhost:3001",
-    "https://warrentycalender.vanirinstalledsales.info"
-  ];
-  
-  
-  app.use(cors({
-    origin: function (origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("CORS not allowed for this origin: " + origin));
-      }
-    },
-    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-  }));
-  
-  
-  app.use(express.json());
+
+
 
 
 // ✅ Function to save tokens to `tokens.json`
@@ -197,7 +199,7 @@ app.get('/oauth2callback', async (req, res) => {
 app.post('/api/refresh-token', async (req, res) => {
     try {
         console.log("🔄 Received request to refresh token...");
-        res.setHeader("Access-Control-Allow-Origin", "https://warrentycalender.vanirinstalledsales.info");
+        res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
         res.setHeader("Access-Control-Allow-Credentials", "true");
         
         const tokens = loadTokens();
@@ -229,10 +231,7 @@ app.post('/api/refresh-token', async (req, res) => {
     }
 });
 
-app.use(cors({
-    origin: 'https://warrentycalender.vanirinstalledsales.info',
-    credentials: true,
-  }));
+
   
 
 // ✅ Endpoint to fetch stored tokens
@@ -261,8 +260,13 @@ app.get('/api/tokens', (req, res) => {
 // ✅ Automatically refresh the access token every 45 minutes
 setInterval(async () => {
     console.log("🔄 Checking token expiration and refreshing if needed...");
-    await refreshAccessToken();
-}, 45 * 60 * 1000);  // Every 45 minutes
+    if (!isAccessTokenValid()) {
+        await refreshAccessToken();
+    } else {
+        console.log("✅ Token still valid. Skipping refresh.");
+    }
+}, 10 * 60 * 1000); // check every 10 mins for more accuracy
+
 
 // ✅ API Endpoint to Create an Event
 app.post('/create-event', async (req, res) => {
