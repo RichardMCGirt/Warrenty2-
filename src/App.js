@@ -76,12 +76,10 @@ async function fetchGoogleCalendarEvents(calendarId) {
   }
 }
 
-const tryFetchServer = async () => {
-  const url = "http://localhost:5001/api/refresh-token";
-
+const tryFetchServer = async (url = "http://localhost:5001/api/refresh-token", options = {}) => {
   try {
     const res = await fetch(url, {
-      method: "POST",
+      ...options,
       credentials: "include",
     });
 
@@ -89,15 +87,15 @@ const tryFetchServer = async () => {
       throw new Error(`Server responded with status ${res.status}`);
     }
 
-    const data = await res.json();
-    return data;
+    return res;
   } catch (err) {
     if (process.env.NODE_ENV === "development") {
       console.warn(`⚠️ Skipping server call (${url}) - server might not be running.`);
     }
-    return null; // safe fallback
+    return null;
   }
 };
+
 
 
 
@@ -110,24 +108,30 @@ async function refreshAccessToken() {
       headers: { "Content-Type": "application/json" },
     });
 
-    if (!response || !response.ok) {
-      throw new Error("Server not available or token refresh failed");
+    // 🔽 Add this line here
+    if (!response) {
+      console.info("ℹ️ Running in client-only mode. Using local token.");
     }
 
-    const data = await response.json();
-
-    if (data.access_token) {
-      localStorage.setItem("accessToken", data.access_token);
-      localStorage.setItem("tokenExpiry", (Date.now() + data.expires_in * 1000).toString());
-      return data.access_token;
+    if (response) {
+      const data = await response.json();
+      if (data.access_token) {
+        localStorage.setItem("accessToken", data.access_token);
+        localStorage.setItem("tokenExpiry", (Date.now() + data.expires_in * 1000).toString());
+        return data.access_token;
+      }
     }
 
-    throw new Error("No access token returned");
+    console.warn("⚠️ Server not available or token not refreshed.");
+    return localStorage.getItem("accessToken") || null;
+
   } catch (error) {
-    console.warn("⚠️ Failed to refresh via server, fallback to existing token.");
+    console.warn("⚠️ Refresh attempt failed. Falling back to existing token.");
     return localStorage.getItem("accessToken") || null;
   }
 }
+
+
 
 
 

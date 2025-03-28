@@ -197,7 +197,9 @@ app.get('/oauth2callback', async (req, res) => {
 app.post('/api/refresh-token', async (req, res) => {
     try {
         console.log("🔄 Received request to refresh token...");
-
+        res.setHeader("Access-Control-Allow-Origin", "https://warrentycalender.vanirinstalledsales.info");
+        res.setHeader("Access-Control-Allow-Credentials", "true");
+        
         const tokens = loadTokens();
         if (!tokens || !tokens.refresh_token) {
             return res.status(400).json({ error: "No refresh token found. User must reauthenticate." });
@@ -227,7 +229,11 @@ app.post('/api/refresh-token', async (req, res) => {
     }
 });
 
-
+app.use(cors({
+    origin: 'https://warrentycalender.vanirinstalledsales.info',
+    credentials: true,
+  }));
+  
 
 // ✅ Endpoint to fetch stored tokens
 app.get('/api/tokens', (req, res) => {
