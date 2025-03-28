@@ -847,7 +847,8 @@ function formatCountdown(seconds) {
 }
 
 function App() {
-
+  const supabase = useSupabaseClient();
+  const session = useSession();
   const [hasToken, setHasToken] = useState(false);
 
   const calendarMap = {
@@ -863,37 +864,58 @@ function App() {
   };
 
   useEffect(() => {
-    const validateToken = async () => {
-      const token = localStorage.getItem("accessToken");
-      if (!token) {
-        setHasToken(false);
-        return;
+    const hash = window.location.hash;
+    if (hash) {
+      const params = new URLSearchParams(hash.substring(1));
+      const token = params.get("access_token");
+      const expiresIn = parseInt(params.get("expires_in") || "3600");
+  
+      if (token) {
+        console.log("🔑 Google Access Token extracted from URL:", token);
+        localStorage.setItem("accessToken", token);
+        localStorage.setItem("tokenExpiry", (Date.now() + expiresIn * 1000).toString());
+  
+        // Clear hash to keep URL clean
+        window.history.replaceState(null, "", window.location.pathname);
       }
+    }
+  }, []);
   
-      try {
-        const response = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-  
-        const userInfo = await response.json();
-  
-        if (userInfo.email?.endsWith("@vanirinstalledsales.com")) {
-          console.log("✅ Valid token and authorized user:", userInfo.email);
-          setHasToken(true);
-        } else {
-          console.warn("❌ Invalid token or unauthorized email.");
-          localStorage.removeItem("accessToken");
-          setHasToken(false);
-        }
-      } catch (error) {
-        console.error("❌ Failed to validate token:", error);
+
+  const validateToken = async () => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) {
+      setHasToken(false);
+      return;
+    }
+
+    try {
+      const response = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      const userInfo = await response.json();
+
+      if (userInfo.email?.endsWith("@vanirinstalledsales.com")) {
+        console.log("✅ Valid token and authorized user:", userInfo.email);
+        setHasToken(true);
+      } else {
+        console.warn("❌ Invalid token or unauthorized email.");
         localStorage.removeItem("accessToken");
         setHasToken(false);
       }
-    };
-  
+    } catch (error) {
+      console.error("❌ Failed to validate token:", error);
+      localStorage.removeItem("accessToken");
+      setHasToken(false);
+    }
+  };
+
+  // ✅ Proper useEffect to run once when session changes
+  useEffect(() => {
     validateToken();
   }, []);
+  
   
   
   
@@ -943,8 +965,7 @@ function App() {
     return Math.max(0, Math.floor((nextTenMinuteMark - now) / 1000)); // Return remaining time in seconds
 }
 
-  const supabase = useSupabaseClient();
-  const session = useSession();
+  
   const [countdown, setCountdown] = useState(getTimeUntilNextQuarterHour());
   const [calendarEvents, setCalendarEvents] = useState(
     Object.fromEntries(
@@ -1234,14 +1255,21 @@ async function handleAuthSuccess(session) {
 
   const tokens = {
       access_token: session.provider_token,
-      refresh_token: session.refresh_token,  // Ensure this exists, or persist it from backend
+      refresh_token: session.refresh_token,
       expires_in: session.expires_in || 3600,
       token_type: "Bearer",
   };
 
-  // ✅ Send tokens to backend for storage
+  localStorage.setItem("accessToken", session.provider_token);
+  localStorage.setItem("tokenExpiry", (Date.now() + (session.expires_in || 3600) * 1000).toString());
+
   await saveTokensToBackend(tokens);
+
+  // ✅ Call it here to show the countdown and sync button
+  await validateToken();
 }
+
+
 
 
 function LoginButton() {
@@ -1410,26 +1438,30 @@ return (
       Sign in with Google
     </button>
 
+    {hasToken && (
+  <>
     <p>Next sync in: {formatCountdown(countdown)}</p>
-    {!hasToken && (
-  <p style={{ color: 'gray' }}>🔒 Please sign in with a Vanir account to create events.</p>
+
+    <button
+      onClick={async () => {
+        const token = await getValidAccessToken();
+        if (!token) {
+          alert("❌ You must be signed in to sync events.");
+          return;
+        }
+        await fetchAndProcessEvents();
+      }}
+      style={{ margin: '10px 0' }}
+    >
+      Sync Now
+    </button>
+  </>
 )}
 
-    {hasToken && (
-      <button
-  onClick={async () => {
-    const token = await getValidAccessToken();
-    if (!token) {
-      alert("❌ You must be signed in to sync events.");
-      return;
-    }
-    await fetchAndProcessEvents();
-  }}
-  style={{ margin: '10px 0' }}
->
-  Sync Now
-</button>
-
+{!hasToken && (
+  <p style={{ color: 'gray' }}>
+    🔒 Please sign in with a Vanir account to create events.
+  </p>
 )}
 
 
