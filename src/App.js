@@ -76,21 +76,29 @@ async function fetchGoogleCalendarEvents(calendarId) {
   }
 }
 
-async function tryFetchServer(url, options = {}, timeout = 3000) {
+const tryFetchServer = async () => {
+  const url = "http://localhost:5001/api/refresh-token";
+
   try {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeout);
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal
+    const res = await fetch(url, {
+      method: "POST",
+      credentials: "include",
     });
-    clearTimeout(id);
-    return response;
+
+    if (!res.ok) {
+      throw new Error(`Server responded with status ${res.status}`);
+    }
+
+    const data = await res.json();
+    return data;
   } catch (err) {
-    console.warn(`⚠️ Skipping server call (${url}) - server might not be running.`);
-    return null;
+    if (process.env.NODE_ENV === "development") {
+      console.warn(`⚠️ Skipping server call (${url}) - server might not be running.`);
+    }
+    return null; // safe fallback
   }
-}
+};
+
 
 
 async function refreshAccessToken() {
@@ -123,26 +131,29 @@ async function refreshAccessToken() {
 
 
 
+let refreshFailedAt = 0;
+
 async function getValidAccessToken() {
-  try {
-      console.log("🔄 Checking if token refresh is needed...");
-      
-      let tokenExpiry = parseInt(localStorage.getItem("tokenExpiry"), 10) || 0;
-      let now = Date.now();
+  const now = Date.now();
 
-      if (!tokenExpiry || now >= tokenExpiry) {
-          console.warn("⚠️ Token expired or missing. Refreshing...");
-          return await refreshAccessToken();  // Refresh token if expired
-      }
-
-      let accessToken = localStorage.getItem("accessToken");
-      console.log("✅ Using stored access token:", accessToken);
-      return accessToken;
-  } catch (error) {
-      console.error("❌ Error getting valid access token:", error);
-      return null;
+  // Don’t retry for 3 minutes if the last attempt failed
+  if (now - refreshFailedAt < 3 * 60 * 1000) {
+    console.warn("⏱️ Skipping refresh — recently failed.");
+    return localStorage.getItem("accessToken");
   }
+
+  try {
+    console.log("🔄 Trying to refresh access token...");
+    await refreshAccessToken(); // your existing logic
+    refreshFailedAt = 0; // success resets failure timer
+  } catch (err) {
+    refreshFailedAt = now;
+    console.warn("⚠️ Failed to refresh via server. Fallback to existing token.");
+  }
+
+  return localStorage.getItem("accessToken");
 }
+
 
 
 
@@ -836,6 +847,9 @@ function formatCountdown(seconds) {
 }
 
 function App() {
+
+  const [hasToken, setHasToken] = useState(false);
+
   const calendarMap = {
     Savannah: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
     Charleston: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com',
@@ -849,56 +863,69 @@ function App() {
   };
 
   useEffect(() => {
-    const hash = window.location.hash;
-    if (hash && hash.includes("access_token")) {
-      const params = new URLSearchParams(hash.substring(1));
-      const token = params.get("access_token");
-  
-      if (token) {
-        localStorage.setItem("accessToken", token);
-        fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        })
-          .then((res) => res.json())
-          .then((userInfo) => {
-            const email = userInfo.email;
-            if (email.endsWith("@vanirinstalledsales.com")) {
-              console.log("✅ Logged in:", email);
-              localStorage.setItem("userEmail", email);
-              // Proceed with rest of your app logic
-            } else {
-              alert("❌ Unauthorized. You must use a @vanirinstalledsales.com account.");
-              localStorage.removeItem("accessToken");
-            }
-          });
+    const validateToken = async () => {
+      const token = localStorage.getItem("accessToken");
+      if (!token) {
+        setHasToken(false);
+        return;
       }
-    }
+  
+      try {
+        const response = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+  
+        const userInfo = await response.json();
+  
+        if (userInfo.email?.endsWith("@vanirinstalledsales.com")) {
+          console.log("✅ Valid token and authorized user:", userInfo.email);
+          setHasToken(true);
+        } else {
+          console.warn("❌ Invalid token or unauthorized email.");
+          localStorage.removeItem("accessToken");
+          setHasToken(false);
+        }
+      } catch (error) {
+        console.error("❌ Failed to validate token:", error);
+        localStorage.removeItem("accessToken");
+        setHasToken(false);
+      }
+    };
+  
+    validateToken();
   }, []);
+  
+  
   
 
   // ✅ Automatically refresh token every 55 minutes
-useEffect(() => {
-  const checkTokenExpiry = async () => {
-      let tokenExpiry = parseInt(localStorage.getItem("tokenExpiry"), 10) || 0;
-      let now = Date.now();
-
-      if (!tokenExpiry || now >= tokenExpiry) {
-          console.warn("⚠️ Token expired or missing. Refreshing...");
-          await getValidAccessToken();
-      } else {
-          console.log("✅ Token is still valid.");
-      }
-  };
-
-  checkTokenExpiry();
+  useEffect(() => {
+    const checkTokenExpiry = async () => {
+      const tokenExpiry = parseInt(localStorage.getItem("tokenExpiry"), 10);
+      const now = Date.now();
   
-  // Refresh token every 55 minutes (3300 seconds)
-  const interval = setInterval(checkTokenExpiry, 55 * 60 * 1000);
-
-  return () => clearInterval(interval);
-}, []);
+      // If token exists and is still valid, skip refresh
+      if (tokenExpiry && now < tokenExpiry) {
+        console.log("✅ Token is still valid.");
+        return;
+      }
+  
+      // If no expiry or expired, attempt refresh
+      if (process.env.NODE_ENV === "development") {
+        console.warn("⚠️ Token expired or missing. Trying to refresh...");
+      }      try {
+        await getValidAccessToken();
+      } catch (err) {
+        console.error("❌ Token refresh failed, but using existing token if still functional.");
+      }
+    };
+  
+    checkTokenExpiry();
+  
+    const interval = setInterval(checkTokenExpiry, 55 * 60 * 1000); // every 55 min
+    return () => clearInterval(interval);
+  }, []);
+  
 
 
   function getTimeUntilNextQuarterHour() {
@@ -1219,7 +1246,7 @@ async function handleAuthSuccess(session) {
 
 function LoginButton() {
   const login = () => {
-    const CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID";
+    const CLIENT_ID = "882687108659-vqkr605rdsgesl5h348l07o0um11rjjg.apps.googleusercontent.com";
     const REDIRECT_URI = window.location.origin;
     const SCOPE = "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.email";
     const RESPONSE_TYPE = "token";
@@ -1233,18 +1260,7 @@ function LoginButton() {
 }
 
   
-  const handleLogout = async () => {
-    try {
-      const { error } = await supabase.auth.refreshSession();
-      if (error) {
-        console.error('Error refreshing session:', error);
-      }
-      await supabase.auth.signOut();
-      console.log('User logged out successfully.');
-    } catch (error) {
-      console.error('Error during logout:', error);
-    }
-  };
+
   
 
   async function fetchAndProcessEvents() {
@@ -1395,10 +1411,27 @@ return (
     </button>
 
     <p>Next sync in: {formatCountdown(countdown)}</p>
+    {!hasToken && (
+  <p style={{ color: 'gray' }}>🔒 Please sign in with a Vanir account to sync events.</p>
+)}
 
-    <button onClick={fetchAndProcessEvents} style={{ margin: '10px 0' }}>
-      Sync Now
-    </button>
+    {hasToken && (
+      <button
+  onClick={async () => {
+    const token = await getValidAccessToken();
+    if (!token) {
+      alert("❌ You must be signed in to sync events.");
+      return;
+    }
+    await fetchAndProcessEvents();
+  }}
+  style={{ margin: '10px 0' }}
+>
+  Sync Now
+</button>
+
+)}
+
 
     {/* Calendar Display */}
     <div
