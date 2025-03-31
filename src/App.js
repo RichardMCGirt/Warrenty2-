@@ -106,7 +106,7 @@ const tryFetchServer = async (url = "http://localhost:5001/api/refresh-token", o
 async function refreshAccessToken() {
   try {
     console.log("🔄 Trying to refresh access token...");
-    const response = await tryFetchServer("http://localhost:5001/api/refresh-token", {
+    const response = await tryFetchServer("/api/refresh-token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     });
