@@ -10,7 +10,6 @@ function normalizeDateTime(dateStr) {
 }
 
 
-
 async function fetchWithRetry(url, options, retries = 3, delay = 10000) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -33,7 +32,6 @@ async function fetchWithRetry(url, options, retries = 3, delay = 10000) {
   console.error("Max retries reached. API request failed.");
   return null;
 }
-
 
 
 async function fetchGoogleCalendarEvents(calendarId) {
@@ -68,10 +66,8 @@ async function fetchGoogleCalendarEvents(calendarId) {
           return [];
       }
 
-      console.log("🛰️ Refresh token response status:", response.status);
       const data = await response.json();
-      console.log("🔑 Token data from backend:", data);
-            console.log(`✅ Successfully fetched ${data.items?.length || 0} events.`);
+      console.log(`✅ Successfully fetched ${data.items?.length || 0} events.`);
       return data.items || [];
 
   } catch (error) {
@@ -80,98 +76,73 @@ async function fetchGoogleCalendarEvents(calendarId) {
   }
 }
 
-const tryFetchServer = async (url = "http://localhost:5001/api/refresh-token", options = {}) => {
+async function tryFetchServer(url, options = {}, timeout = 3000) {
   try {
-    const res = await fetch(url, {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    const response = await fetch(url, {
       ...options,
-      credentials: "include",
+      signal: controller.signal
     });
-
-    if (!res.ok) {
-      throw new Error(`Server responded with status ${res.status}`);
-    }
-
-    return res;
+    clearTimeout(id);
+    return response;
   } catch (err) {
-    if (process.env.NODE_ENV === "development") {
-      console.warn(`⚠️ Skipping server call (${url}) - server might not be running.`);
-    }
+    console.warn(`⚠️ Skipping server call (${url}) - server might not be running.`);
     return null;
   }
-};
-
-
+}
 
 
 async function refreshAccessToken() {
   try {
     console.log("🔄 Trying to refresh access token...");
-    const response = await tryFetchServer("/api/refresh-token", {
+
+    const response = await tryFetchServer("http://localhost:5001/api/refresh-token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     });
-    if (!response) {
-      console.info("ℹ️ Running in client-only mode. Using local token.");
+
+    if (!response || !response.ok) {
+      throw new Error("Server not available or token refresh failed");
     }
-    if (response) {
-      console.log("🛰️ Refresh token response status:", response.status);
-      const data = await response.json();
-      console.log("🔑 Token data from backend:", data);
-      if (data.access_token) {
-        localStorage.setItem("accessToken", data.access_token);
-        localStorage.setItem("tokenExpiry", (Date.now() + data.expires_in * 1000).toString());
-        return data.access_token;
-      }
+
+    const data = await response.json();
+
+    if (data.access_token) {
+      localStorage.setItem("accessToken", data.access_token);
+      localStorage.setItem("tokenExpiry", (Date.now() + data.expires_in * 1000).toString());
+      return data.access_token;
     }
-    console.warn("⚠️ Server not available or token not refreshed.");
-    return localStorage.getItem("accessToken") || null;
+
+    throw new Error("No access token returned");
   } catch (error) {
-    console.warn("⚠️ Refresh attempt failed. Falling back to existing token.");
+    console.warn("⚠️ Failed to refresh via server, fallback to existing token.");
     return localStorage.getItem("accessToken") || null;
   }
 }
 
-
-
-
-
-let refreshFailedAt = 0;
-
-function isAccessTokenValid() {
-  const token = localStorage.getItem("accessToken");
-  const expiry = localStorage.getItem("tokenExpiry");
-  const now = Date.now();
-  const buffer = 5 * 60 * 1000;
-  return token && expiry && parseInt(expiry) - now > buffer;
-}
 
 
 async function getValidAccessToken() {
-  const now = Date.now();
-  if (isAccessTokenValid()) {
-    console.log("✅ Token is still valid.");
-    return localStorage.getItem("accessToken");
-  }
-  if (now - refreshFailedAt < 3 * 60 * 1000) {
-    console.warn("⏱️ Skipping refresh — recently failed.");
-    return localStorage.getItem("accessToken");
-  }
   try {
-    console.log("🔄 Trying to refresh access token...");
-    const refreshedToken = await refreshAccessToken();
-    if (refreshedToken) {
-      refreshFailedAt = 0;
-      return refreshedToken;
-    }
-  } catch (err) {
-    refreshFailedAt = now;
-    console.warn("⚠️ Failed to refresh token, fallback to last known one.");
+      console.log("🔄 Checking if token refresh is needed...");
+      
+      let tokenExpiry = parseInt(localStorage.getItem("tokenExpiry"), 10) || 0;
+      let now = Date.now();
+
+      if (!tokenExpiry || now >= tokenExpiry) {
+          console.warn("⚠️ Token expired or missing. Refreshing...");
+          return await refreshAccessToken();  // Refresh token if expired
+      }
+
+      let accessToken = localStorage.getItem("accessToken");
+      console.log("✅ Using stored access token:", accessToken);
+      return accessToken;
+  } catch (error) {
+      console.error("❌ Error getting valid access token:", error);
+      return null;
   }
-  return localStorage.getItem("accessToken");
 }
-
-
-
 
 
 
@@ -188,52 +159,69 @@ if (typeof isTerminated !== 'undefined' && isTerminated) {
 
 
 async function createGoogleCalendarEvent(event, calendarId, session) {
-  if (!session || !session.provider_token) {
-    console.error("❌ No valid session token found. Attempting to refresh...");
-    session = { provider_token: await getValidAccessToken() };
-  }
-
-  if (!session.provider_token) {
-    console.error("❌ Still no valid access token after refresh. Aborting event creation.");
+  if (!event?.title || !event?.start || !event?.end) {
+    console.error("❌ Missing required event fields:", event);
     return null;
   }
 
-  console.log("🔑 Using Access Token in Script:", session.provider_token);
+  const accessToken = session?.provider_token || await getValidAccessToken();
+  if (!accessToken) {
+    console.error("❌ No valid access token. Cannot create event.");
+    return null;
+  }
 
-  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
-  
+  // 🔄 Swap if times are reversed
+  const startDateTime = new Date(event.start);
+  const endDateTime = new Date(event.end);
+  if (endDateTime <= startDateTime) {
+    console.warn(`⚠️ Swapping start and end for event "${event.title}"`);
+    [event.start, event.end] = [event.end, event.start];
+  }
+
   const newEvent = {
     summary: event.title,
-    description: event.description || "No description provided",
-    start: { dateTime: new Date(event.start).toISOString(), timeZone: "America/Toronto" },
-    end: { dateTime: new Date(event.end).toISOString(), timeZone: "America/Toronto" },
-    location: event.location || "No location provided",
+    description: event.description || "",
+    start: {
+      dateTime: new Date(event.start).toISOString(),
+      timeZone: "America/Toronto",
+    },
+    end: {
+      dateTime: new Date(event.end).toISOString(),
+      timeZone: "America/Toronto",
+    },
+    location: event.location || "",
   };
 
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${session.provider_token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(newEvent),
-    });
+    console.log("📤 Creating event:", JSON.stringify(newEvent, null, 2));
+
+    const response = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(newEvent),
+      }
+    );
 
     const data = await response.json();
-    
     if (!response.ok) {
-      console.error("❌ Error creating Google Calendar event:", data);
+      console.error("❌ Failed to create event:", data);
       return null;
     }
 
-    console.log(`✅ Event created successfully: "${event.title}" (ID: ${data.id})`);
+    console.log("✅ Event created:", data.id);
     return data.id;
-  } catch (error) {
-    console.error("❌ Failed to create event:", error);
+  } catch (err) {
+    console.error("❌ Network error creating event:", err);
     return null;
   }
 }
+
+
 
 async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, googleEventId, hasChanges, calendarLink) {
   if (!hasChanges) {
@@ -341,7 +329,7 @@ async function fetchUnprocessedEventsFromAirtable() {
   today.setHours(0, 0, 0, 0);
   const todayISO = today.toISOString().split("T")[0]; // Extracts YYYY-MM-DD format
   
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=OR(IS_AFTER({FormattedStartDate}, '${todayISO}'), {FormattedStartDate}='${todayISO}')`;
+  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=OR(IS_AFTER({StartDate}, '${todayISO}'), {StartDate}='${todayISO}')`;
   
   try {
     const options = {
@@ -356,8 +344,8 @@ async function fetchUnprocessedEventsFromAirtable() {
           const records = data.records.map((record) => ({
             id: record.id,
             title: record.fields['Lot Number and Community/Neighborhood'] || 'No lot number',
-            start: new Date(record.fields['FormattedStartDate']),
-            end: new Date(record.fields['FormattedEndDate']),
+            start: new Date(record.fields['StartDate']),
+            end: new Date(record.fields['EndDate']),
             description: record.fields['Description of Issue'] || '',
             b: record.fields['b'] || '',
             processed: record.fields['Processed'] || false,
@@ -556,12 +544,24 @@ async function populateGoogleCalendarWithAirtableRecords(
 
         // Skip updates if no changes exist
         if (!isEventDifferent(event, googleEvent)) {
-          console.log(`✅ No changes detected for event "${event.title}". Skipping update.`);
+          console.log(`✅ No changes detected for event "${event.title}". Linking to existing Google event.`);
+        
+          // ✅ Write GoogleEventId to Airtable if missing
+          if (!event.googleEventId) {
+            await updateAirtableWithGoogleEventIdAndProcessed(
+              event.id,
+              googleEvent.id,
+              true, // hasChanges = true because we’re adding the ID
+              `https://calendar.google.com/calendar/event?eid=${googleEvent.id}`
+            );
+          }
+        
           noChange.push(event.title);
           processedRecordIds.add(event.id);
           await unlockAirtableRecord(event.id);
           continue;
         }
+        
 
         console.log(`⚠️ Updating event "${event.title}" as it has changed.`);
         await updateGoogleCalendarEvent(
@@ -865,107 +865,69 @@ function formatCountdown(seconds) {
 }
 
 function App() {
-  const supabase = useSupabaseClient();
-  const session = useSession();
-  const [hasToken, setHasToken] = useState(false);
-
   const calendarMap = {
-    Savannah: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-    Charleston: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com',
+  //  Savannah: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
+  //  Charleston: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com',
     Greensboro: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com',
-    MyrtleBeach: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com',
-    Wilmington: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com',
-   Grenville: 'c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf@group.calendar.google.com',
-   Columbia: 'c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515@group.calendar.google.com',
-       Raleigh: 'warranty@vanirinstalledsales.com',
-       Charlotte: 'c_424688691b4dace071516f7adb111ca9e74a5b290f11d33912bacfa933477bcc@group.calendar.google.com',
+  //  MyrtleBeach: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com',
+   // Wilmington: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com',
+ //  Grenville: 'c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf@group.calendar.google.com',
+ //  Columbia: 'c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515@group.calendar.google.com',
+   //    Raleigh: 'warranty@vanirinstalledsales.com',
+    //   Charlotte: 'c_424688691b4dace071516f7adb111ca9e74a5b290f11d33912bacfa933477bcc@group.calendar.google.com',
   };
 
   useEffect(() => {
     const hash = window.location.hash;
-    if (hash) {
+    if (hash && hash.includes("access_token")) {
       const params = new URLSearchParams(hash.substring(1));
       const token = params.get("access_token");
-      const expiresIn = parseInt(params.get("expires_in") || "3600");
   
       if (token) {
-        console.log("🔑 Google Access Token extracted from URL:", token);
         localStorage.setItem("accessToken", token);
-        localStorage.setItem("tokenExpiry", (Date.now() + expiresIn * 1000).toString());
-  
-        // Clear hash to keep URL clean
-        window.history.replaceState(null, "", window.location.pathname);
+        fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        })
+          .then((res) => res.json())
+          .then((userInfo) => {
+            const email = userInfo.email;
+            if (email.endsWith("@vanirinstalledsales.com")) {
+              console.log("✅ Logged in:", email);
+              localStorage.setItem("userEmail", email);
+              // Proceed with rest of your app logic
+            } else {
+              alert("❌ Unauthorized. You must use a @vanirinstalledsales.com account.");
+              localStorage.removeItem("accessToken");
+            }
+          });
       }
     }
   }, []);
-  
-
-  const validateToken = async () => {
-    const token = localStorage.getItem("accessToken");
-    if (!token) {
-      setHasToken(false);
-      return;
-    }
-
-    try {
-      const response = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      const userInfo = await response.json();
-
-      if (userInfo.email?.endsWith("@vanirinstalledsales.com")) {
-        console.log("✅ Valid token and authorized user:", userInfo.email);
-        setHasToken(true);
-      } else {
-        console.warn("❌ Invalid token or unauthorized email.");
-        localStorage.removeItem("accessToken");
-        setHasToken(false);
-      }
-    } catch (error) {
-      console.error("❌ Failed to validate token:", error);
-      localStorage.removeItem("accessToken");
-      setHasToken(false);
-    }
-  };
-
-  // ✅ Proper useEffect to run once when session changes
-  useEffect(() => {
-    validateToken();
-  }, []);
-  
-  
-  
   
 
   // ✅ Automatically refresh token every 55 minutes
-  useEffect(() => {
-    const checkTokenExpiry = async () => {
-      const tokenExpiry = parseInt(localStorage.getItem("tokenExpiry"), 10);
-      const now = Date.now();
-  
-      // If token exists and is still valid, skip refresh
-      if (tokenExpiry && now < tokenExpiry) {
-        console.log("✅ Token is still valid.");
-        return;
+useEffect(() => {
+  const checkTokenExpiry = async () => {
+      let tokenExpiry = parseInt(localStorage.getItem("tokenExpiry"), 10) || 0;
+      let now = Date.now();
+
+      if (!tokenExpiry || now >= tokenExpiry) {
+          console.warn("⚠️ Token expired or missing. Refreshing...");
+          await getValidAccessToken();
+      } else {
+          console.log("✅ Token is still valid.");
       }
+  };
+
+  checkTokenExpiry();
   
-      // If no expiry or expired, attempt refresh
-      if (process.env.NODE_ENV === "development") {
-        console.warn("⚠️ Token expired or missing. Trying to refresh...");
-      }      try {
-        await getValidAccessToken();
-      } catch (err) {
-        console.error("❌ Token refresh failed, but using existing token if still functional.");
-      }
-    };
-  
-    checkTokenExpiry();
-  
-    const interval = setInterval(checkTokenExpiry, 55 * 60 * 1000); // every 55 min
-    return () => clearInterval(interval);
-  }, []);
-  
+  // Refresh token every 55 minutes (3300 seconds)
+  const interval = setInterval(checkTokenExpiry, 55 * 60 * 1000);
+
+  return () => clearInterval(interval);
+}, []);
 
 
   function getTimeUntilNextQuarterHour() {
@@ -983,7 +945,8 @@ function App() {
     return Math.max(0, Math.floor((nextTenMinuteMark - now) / 1000)); // Return remaining time in seconds
 }
 
-  
+  const supabase = useSupabaseClient();
+  const session = useSession();
   const [countdown, setCountdown] = useState(getTimeUntilNextQuarterHour());
   const [calendarEvents, setCalendarEvents] = useState(
     Object.fromEntries(
@@ -1031,10 +994,8 @@ function App() {
         return [];
       }
   
-      console.log("🛰️ Refresh token response status:", response.status);
       const data = await response.json();
-      console.log("🔑 Token data from backend:", data);
-            console.log(`✅ Fetched ${data.items?.length || 0} events from Google Calendar.`);
+      console.log(`✅ Fetched ${data.items?.length || 0} events from Google Calendar.`);
       return data.items || [];
     } catch (error) {
       console.error('❌ Error fetching Google Calendar events:', error.message);
@@ -1275,26 +1236,19 @@ async function handleAuthSuccess(session) {
 
   const tokens = {
       access_token: session.provider_token,
-      refresh_token: session.refresh_token,
+      refresh_token: session.refresh_token,  // Ensure this exists, or persist it from backend
       expires_in: session.expires_in || 3600,
       token_type: "Bearer",
   };
 
-  localStorage.setItem("accessToken", session.provider_token);
-  localStorage.setItem("tokenExpiry", (Date.now() + (session.expires_in || 3600) * 1000).toString());
-
+  // ✅ Send tokens to backend for storage
   await saveTokensToBackend(tokens);
-
-  // ✅ Call it here to show the countdown and sync button
-  await validateToken();
 }
-
-
 
 
 function LoginButton() {
   const login = () => {
-    const CLIENT_ID = "882687108659-vqkr605rdsgesl5h348l07o0um11rjjg.apps.googleusercontent.com";
+    const CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID";
     const REDIRECT_URI = window.location.origin;
     const SCOPE = "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.email";
     const RESPONSE_TYPE = "token";
@@ -1308,7 +1262,18 @@ function LoginButton() {
 }
 
   
-
+  const handleLogout = async () => {
+    try {
+      const { error } = await supabase.auth.refreshSession();
+      if (error) {
+        console.error('Error refreshing session:', error);
+      }
+      await supabase.auth.signOut();
+      console.log('User logged out successfully.');
+    } catch (error) {
+      console.error('Error during logout:', error);
+    }
+  };
   
 
   async function fetchAndProcessEvents() {
@@ -1458,32 +1423,11 @@ return (
       Sign in with Google
     </button>
 
-    {hasToken && (
-  <>
     <p>Next sync in: {formatCountdown(countdown)}</p>
 
-    <button
-      onClick={async () => {
-        const token = await getValidAccessToken();
-        if (!token) {
-          alert("❌ You must be signed in to sync events.");
-          return;
-        }
-        await fetchAndProcessEvents();
-      }}
-      style={{ margin: '10px 0' }}
-    >
+    <button onClick={fetchAndProcessEvents} style={{ margin: '10px 0' }}>
       Sync Now
     </button>
-  </>
-)}
-
-{!hasToken && (
-  <p style={{ color: 'gray' }}>
-    🔒 Please sign in with a Vanir account to create events.
-  </p>
-)}
-
 
     {/* Calendar Display */}
     <div
