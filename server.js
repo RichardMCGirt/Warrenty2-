@@ -11,7 +11,10 @@ module.exports = { loadTokens, refreshAccessToken, saveTokens };
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const PORT = process.env.PORT || 5001;
-const REDIRECT_URI = process.env.REDIRECT_URI || 'https://warrentycalender.vanirinstalledsales.info//oauth2callback';
+const REDIRECT_URI =
+  process.env.NODE_ENV === "production"
+    ? "https://warrentycalender.vanirinstalledsales.info/oauth2callback"
+    : "http://localhost:3000/oauth2callback";
 
 const app = express();
 
@@ -22,10 +25,11 @@ const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_U
 
 const corsOptions = {
     origin: function (origin, callback) {
-      const allowedOrigins = [
-        'https://warrentycalender.vanirinstalledsales.info',
-        'http://localhost:3001'
-      ];
+        const allowedOrigins = [
+          'https://warrentycalender.vanirinstalledsales.info',
+          'http://localhost:3000', // <-- ✅ Add this line
+          'http://localhost:3001'
+        ];
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
@@ -254,14 +258,31 @@ app.get('/api/tokens', (req, res) => {
 });
 
 
-
+// Example: Define isAccessTokenValid (ensure this is defined before its usage)
+function isAccessTokenValid(tokens) {
+    if (!tokens || !tokens.access_token) {
+      return false; // No access token available
+    }
+    const now = Date.now();
+    if (tokens.expiry_date) {
+      // expiry_date is a timestamp in ms when the token expires
+      return now < tokens.expiry_date;
+    } else if (tokens.expires_in) {
+      // If only expires_in (seconds) is stored, compute an expiry date
+      const issuedTime = tokens.issued_at || (tokens.expiry_date ? tokens.expiry_date - tokens.expires_in * 1000 : now);
+      return now < issuedTime + tokens.expires_in * 1000;
+    }
+    return false;
+  }
+  
 
 
 // ✅ Automatically refresh the access token every 45 minutes
 setInterval(async () => {
     console.log("🔄 Checking token expiration and refreshing if needed...");
-    if (!isAccessTokenValid()) {
-        await refreshAccessToken();
+    const tokens = loadTokens();
+    if (!isAccessTokenValid(tokens)) {
+            await refreshAccessToken();
     } else {
         console.log("✅ Token still valid. Skipping refresh.");
     }
@@ -301,6 +322,44 @@ app.post('/create-event', async (req, res) => {
         res.status(500).json({ message: "Failed to create event" });
     }
 });
+
+app.post("/api/exchange-code", async (req, res) => {
+    const { code } = req.body;
+  
+    if (!code) {
+      return res.status(400).json({ error: "Authorization code is missing" });
+    }
+  
+    try {
+      const response = await axios.post("https://oauth2.googleapis.com/token", null, {
+        params: {
+          code,
+          client_id: CLIENT_ID,
+          client_secret: CLIENT_SECRET,
+          redirect_uri: REDIRECT_URI,
+          grant_type: "authorization_code",
+        },
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      });
+  
+      const tokens = response.data;
+  
+      if (!tokens.refresh_token) {
+        console.warn("⚠️ No refresh token returned. The user may have previously authorized the app without `prompt=consent`.");
+      }
+  
+      // Save tokens to file
+      saveTokens(tokens);
+      oauth2Client.setCredentials(tokens);
+  
+      console.log("✅ Exchanged code and stored tokens.");
+      res.json(tokens);
+    } catch (error) {
+      console.error("❌ Failed to exchange code for tokens:", error.response?.data || error.message);
+      res.status(500).json({ error: "Failed to exchange code" });
+    }
+  });
+  
 
 // 🔹 Start Server
 app.listen(PORT, () => {
