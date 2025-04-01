@@ -866,15 +866,15 @@ function formatCountdown(seconds) {
 
 function App() {
   const calendarMap = {
-  //  Savannah: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-  //  Charleston: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com',
+    Savannah: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
+   Charleston: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com',
     Greensboro: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com',
-  //  MyrtleBeach: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com',
-   // Wilmington: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com',
- //  Grenville: 'c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf@group.calendar.google.com',
- //  Columbia: 'c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515@group.calendar.google.com',
-   //    Raleigh: 'warranty@vanirinstalledsales.com',
-    //   Charlotte: 'c_424688691b4dace071516f7adb111ca9e74a5b290f11d33912bacfa933477bcc@group.calendar.google.com',
+    MyrtleBeach: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com',
+   Wilmington: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com',
+  Grenville: 'c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf@group.calendar.google.com',
+  Columbia: 'c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515@group.calendar.google.com',
+     Raleigh: 'warranty@vanirinstalledsales.com',
+      Charlotte: 'c_424688691b4dace071516f7adb111ca9e74a5b290f11d33912bacfa933477bcc@group.calendar.google.com',
   };
 
   useEffect(() => {
@@ -957,7 +957,29 @@ useEffect(() => {
     )
   );
 
+// ✅ THIS IS WHERE YOU ADD IT
+useEffect(() => {
+  const params = new URLSearchParams(window.location.search);
+  const authCode = params.get("code");
 
+  if (authCode) {
+    fetch("http://localhost:5001/api/exchange-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: authCode }),
+    })
+    .then(res => res.json())
+    .then(data => {
+      console.log("🔐 Tokens from backend:", data);
+      localStorage.setItem("accessToken", data.access_token);
+      localStorage.setItem("refreshToken", data.refresh_token);
+      localStorage.setItem("tokenExpiry", (Date.now() + data.expires_in * 1000).toString());
+
+      // Optionally clean up the URL so ?code= disappears after it's handled
+      window.history.replaceState({}, document.title, window.location.pathname);
+    });
+  }
+}, []);
 
   function isEventDifferent(airtableEvent, googleEvent) {
     const isTitleDifferent = airtableEvent.title !== googleEvent.summary;
@@ -1248,15 +1270,25 @@ async function handleAuthSuccess(session) {
 
 function LoginButton() {
   const login = () => {
-    const CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID";
-    const REDIRECT_URI = window.location.origin;
+    const CLIENT_ID = '882687108659-vqkr605rdsgesl5h348l07o0um11rjjg.apps.googleusercontent.com';
+    const REDIRECT_URI =
+      window.location.hostname === "localhost"
+        ? "http://localhost:3000/oauth2callback"
+        : "https://warrentycalender.vanirinstalledsales.info/oauth2callback";
+  
+    const BACKEND_BASE_URL =
+      window.location.hostname === "localhost"
+        ? "http://localhost:5001"
+        : "https://api.warrentycalender.vanirinstalledsales.info";
+  
     const SCOPE = "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.email";
-    const RESPONSE_TYPE = "token";
-
-    const googleLoginUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=${RESPONSE_TYPE}&scope=${SCOPE}&include_granted_scopes=true`;
-
+    const RESPONSE_TYPE = "code";
+  
+    const googleLoginUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=${RESPONSE_TYPE}&scope=${encodeURIComponent(SCOPE)}&access_type=offline&prompt=consent`;
+  
     window.location.href = googleLoginUrl;
   };
+  
 
   return <button onClick={login}>Sign in with Google</button>;
 }
@@ -1407,21 +1439,8 @@ return (
     <h1>Google Calendar Sync</h1>
 
     {/* 🔐 Google Sign In */}
-    <button
-      onClick={() => {
-        const CLIENT_ID = '882687108659-vqkr605rdsgesl5h348l07o0um11rjjg.apps.googleusercontent.com';
-        const REDIRECT_URI = window.location.origin;
-        const SCOPE = 'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.email';
-        const RESPONSE_TYPE = 'token';
+    <LoginButton />
 
-        const googleLoginUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=${RESPONSE_TYPE}&scope=${SCOPE}&include_granted_scopes=true`;
-
-        window.location.href = googleLoginUrl;
-      }}
-      style={{ marginBottom: '20px', padding: '10px 20px', fontSize: '16px' }}
-    >
-      Sign in with Google
-    </button>
 
     <p>Next sync in: {formatCountdown(countdown)}</p>
 
