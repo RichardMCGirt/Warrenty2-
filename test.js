@@ -9,7 +9,6 @@ function normalizeDateTime(dateStr) {
   return new Date(dateStr).toISOString().split(".")[0] + "Z"; // Removes milliseconds
 }
 
-
 async function fetchWithRetry(url, options, retries = 3, delay = 10000) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -32,7 +31,6 @@ async function fetchWithRetry(url, options, retries = 3, delay = 10000) {
   console.error("Max retries reached. API request failed.");
   return null;
 }
-
 
 async function fetchGoogleCalendarEvents(calendarId) {
   console.log(`📅 Fetching events for Google Calendar: ${calendarId}`);
@@ -76,61 +74,77 @@ async function fetchGoogleCalendarEvents(calendarId) {
   }
 }
 
-async function refreshAccessToken() {
+async function tryFetchServer(url, options = {}, timeout = 3000) {
   try {
-      console.log("🔄 Refreshing access token...");
-
-      const response = await fetch("http://localhost:5001/api/refresh-token", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-      });
-
-      if (!response.ok) {
-          throw new Error(`HTTP error! Status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      if (data.access_token) {
-          console.log("✅ New Access Token:", data.access_token);
-
-          // Store new token & expiry time
-          localStorage.setItem("accessToken", data.access_token);
-          localStorage.setItem("tokenExpiry", (Date.now() + data.expires_in * 1000).toString());
-
-          return data.access_token;
-      } else {
-          throw new Error("No access token returned");
-      }
-  } catch (error) {
-      console.error("❌ Failed to refresh token:", error);
-      return null;
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    clearTimeout(id);
+    return response;
+  } catch (err) {
+    console.warn(`⚠️ Skipping server call (${url}) - server might not be running.`);
+    return null;
   }
 }
 
+async function refreshAccessToken() {
+  try {
+    console.log("🔄 Trying to refresh access token...");
+
+    const response = await tryFetchServer("http://localhost:5001/api/refresh-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (!response || !response.ok) {
+      throw new Error("Server not available or token refresh failed");
+    }
+
+    const data = await response.json();
+
+    if (data.access_token) {
+      localStorage.setItem("accessToken", data.access_token);
+      localStorage.setItem("tokenExpiry", (Date.now() + data.expires_in * 1000).toString());
+      return data.access_token;
+    }
+
+    throw new Error("No access token returned");
+  } catch (error) {
+    console.warn("⚠️ Failed to refresh via server, fallback to existing token.");
+    return localStorage.getItem("accessToken") || null;
+  }
+}
 
 async function getValidAccessToken() {
   try {
-      console.log("🔄 Checking if token refresh is needed...");
-      
-      let tokenExpiry = parseInt(localStorage.getItem("tokenExpiry"), 10) || 0;
-      let now = Date.now();
+    console.log("🔄 Checking if token refresh is needed...");
 
-      if (!tokenExpiry || now >= tokenExpiry) {
-          console.warn("⚠️ Token expired or missing. Refreshing...");
-          return await refreshAccessToken();  // Refresh token if expired
-      }
+    const tokenExpiry = parseInt(localStorage.getItem("tokenExpiry"), 10) || 0;
+    const accessToken = localStorage.getItem("accessToken");
+    const now = Date.now();
 
-      let accessToken = localStorage.getItem("accessToken");
-      console.log("✅ Using stored access token:", accessToken);
-      return accessToken;
+    // 🔁 Handle case where token is missing but expiry is still valid
+    if (!accessToken && tokenExpiry && now < tokenExpiry) {
+      console.warn("⚠️ Token expiry exists but token is missing. Forcing token refresh.");
+      return await refreshAccessToken();
+    }
+
+    // 🧼 Handle standard token expiration
+    if (!tokenExpiry || now >= tokenExpiry) {
+      console.warn("⚠️ Token expired or missing. Refreshing...");
+      return await refreshAccessToken();
+    }
+
+    console.log("✅ Using stored access token:", accessToken);
+    return accessToken;
   } catch (error) {
-      console.error("❌ Error getting valid access token:", error);
-      return null;
+    console.error("❌ Error getting valid access token:", error);
+    return null;
   }
 }
-
-
-
 
 function terminateScript() {
   isTerminated = true;
@@ -142,51 +156,60 @@ if (typeof isTerminated !== 'undefined' && isTerminated) {
   console.log("Script is terminated. Skipping further actions.");
 }
 
-
 async function createGoogleCalendarEvent(event, calendarId, session) {
-  if (!session || !session.provider_token) {
-    console.error("❌ No valid session token found. Attempting to refresh...");
-    session = { provider_token: await getValidAccessToken() };
-  }
-
-  if (!session.provider_token) {
-    console.error("❌ Still no valid access token after refresh. Aborting event creation.");
+  if (!event?.title || !event?.start || !event?.end) {
+    console.error("❌ Missing required event fields:", event);
     return null;
   }
 
-  console.log("🔑 Using Access Token in Script:", session.provider_token);
+  const accessToken = session?.provider_token || await getValidAccessToken();
+  if (!accessToken) {
+    console.error("❌ No valid access token. Cannot create event.");
+    return null;
+  }
 
-  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
-  
   const newEvent = {
     summary: event.title,
-    description: event.description || "No description provided",
-    start: { dateTime: new Date(event.start).toISOString(), timeZone: "America/Toronto" },
-    end: { dateTime: new Date(event.end).toISOString(), timeZone: "America/Toronto" },
-    location: event.location || "No location provided",
+    description: event.description || "",
+    start: {
+      dateTime: new Date(event.start).toISOString(),
+      timeZone: "America/Toronto",
+    },
+    end: {
+      dateTime: new Date(event.end).toISOString(),
+      timeZone: "America/Toronto",
+    },
+    location: event.location || "",
+    attendees: event.fieldManagerEmail
+      ? [{ email: event.fieldManagerEmail }]
+      : [], // ✅ Add attendee if available
   };
 
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${session.provider_token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(newEvent),
-    });
+    console.log("📤 Creating event:", JSON.stringify(newEvent, null, 2));
+
+    const response = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(newEvent),
+      }
+    );
 
     const data = await response.json();
-    
     if (!response.ok) {
-      console.error("❌ Error creating Google Calendar event:", data);
+      console.error("❌ Failed to create event:", data);
       return null;
     }
 
-    console.log(`✅ Event created successfully: "${event.title}" (ID: ${data.id})`);
+    console.log("✅ Event created:", data.id);
     return data.id;
-  } catch (error) {
-    console.error("❌ Failed to create event:", error);
+  } catch (err) {
+    console.error("❌ Network error creating event:", err);
     return null;
   }
 }
@@ -230,62 +253,6 @@ async function updateAirtableWithGoogleEventIdAndProcessed(airtableRecordId, goo
   }
 }
 
-async function lockAirtableRecord(airtableRecordId) {
-  console.log(`Locking Airtable record ${airtableRecordId}`);
-  
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${airtableRecordId}`;
-  const updateData = { fields: { Processed: true } };
-
-  try {
-    const response = await fetch(url, {
-      method: 'PATCH',
-      headers: {
-        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(updateData),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      console.error(`Error locking record ${airtableRecordId}:`, data);
-    } else {
-      console.log(`Record ${airtableRecordId} locked successfully.`);
-    }
-  } catch (error) {
-    console.error(`Error locking record ${airtableRecordId}:`, error);
-  }
-}
-
-async function unlockAirtableRecord(airtableRecordId) {
-  console.log(`Unlocking Airtable record ${airtableRecordId}`);
-
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ/${airtableRecordId}`;
-  
-  // Add a delay to ensure Airtable has time to sync before unlocking
-  await sleep(6000); // 3 seconds delay before unlocking
-
-  try {
-    const response = await fetch(url, {
-      method: 'PATCH',
-      headers: {
-        Authorization: 'Bearer patXTUS9m8os14OO1.6a81b7bc4dd88871072fe71f28b568070cc79035bc988de3d4228d52239c8238',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ fields: {} }), // Empty body when unlocking
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      console.error(`Error unlocking record ${airtableRecordId}:`, data.error || data);
-    } else {
-      console.log(`Record ${airtableRecordId} unlocked successfully.`);
-    }
-  } catch (error) {
-    console.error(`Failed to unlock record ${airtableRecordId}:`, error);
-  }
-}
-
 async function fetchUnprocessedEventsFromAirtable() {
   if (isTerminated) {
     console.log('Script is terminated. Skipping fetch for unprocessed events.');
@@ -297,7 +264,14 @@ async function fetchUnprocessedEventsFromAirtable() {
   today.setHours(0, 0, 0, 0);
   const todayISO = today.toISOString().split("T")[0]; // Extracts YYYY-MM-DD format
   
-  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=OR(IS_AFTER({FormattedStartDate}, '${todayISO}'), {FormattedStartDate}='${todayISO}')`;
+  const url = `https://api.airtable.com/v0/appO21PVRA4Qa087I/tbl6EeKPsNuEvt5yJ?filterByFormula=AND(
+    NOT({StartDate} = ''),
+    NOT({EndDate} = ''),
+    OR(
+      IS_AFTER(DATETIME_FORMAT({StartDate}, 'YYYY-MM-DD'), '${todayISO}'),
+      DATETIME_FORMAT({StartDate}, 'YYYY-MM-DD') = '${todayISO}'
+    )
+  )`;
   
   try {
     const options = {
@@ -312,22 +286,20 @@ async function fetchUnprocessedEventsFromAirtable() {
           const records = data.records.map((record) => ({
             id: record.id,
             title: record.fields['Lot Number and Community/Neighborhood'] || 'No lot number',
-            start: new Date(record.fields['FormattedStartDate']),
-            end: new Date(record.fields['FormattedEndDate']),
+            start: new Date(record.fields['StartDate']),
+            end: new Date(record.fields['EndDate']),
             description: record.fields['Description of Issue'] || '',
             b: record.fields['b'] || '',
             processed: record.fields['Processed'] || false,
-            streetAddress: record.fields['Street Address'] || "",
-            city: record.fields['City'] || "",
-            state: record.fields['State'] || "",
-            zipCode: record.fields['Zip Code'] || "",
             location: [
-                record.fields['Street Address'],
-                record.fields['City'],
-                record.fields['State'],
-                record.fields['Zip Code']
-            ].filter(Boolean).join(', ')
-        }));
+              record.fields['Street Address'],
+              record.fields['City'],
+              record.fields['State'],
+              record.fields['Zip Code']
+            ].filter(Boolean).join(', '),
+            fieldManagerEmail: record.fields['Field Manager Email'] || null, // ← ADD THIS
+          }));
+          
         
         console.log("🚀 Processed Airtable records:", records);
         
@@ -361,7 +333,6 @@ function clearAllTimers() {
     clearInterval(i);
   }
 }
-
 
 // Check for duplicate Google Calendar events
 async function checkForDuplicateEvent(event, calendarId, session) {
@@ -442,284 +413,121 @@ async function checkForDuplicateEvent(event, calendarId, session) {
   }
 }
 
-
-
-
-
-
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function populateGoogleCalendarWithAirtableRecords(
-  calendarId,
-  calendarName,
-  session,
-  setAddedRecords,
-  setFailedRecords,
-  setNoChangeRecords,
-) {
-  console.log(`Starting to populate Google Calendar "${calendarName}" with Airtable records...`);
-
-  if (isTerminated) {
-    console.log('🛑 Script is terminated. Skipping population.');
-    return;
-  }
-
-  const airtableEvents = await fetchUnprocessedEventsFromAirtable();
-  if (isTerminated) {
-    console.log("🛑 Script was terminated after fetching. Stopping processing.");
-    return;
-  }
-
-  const totalFetchedRecords = airtableEvents.length;
-  if (totalFetchedRecords === 0) {
-    console.log(`✅ No unprocessed events to sync for calendar "${calendarName}".`);
-    return;
-  }
-
-  let createdEventsCount = 0;
-  const added = [];
-  const failed = [];
-  const noChange = [];
-  const processedRecordIds = new Set();
-
-  for (const event of airtableEvents) {
-    if (isTerminated) {
-      console.log("🛑 Script was terminated. Stopping event processing.");
-      return;
-    }
-
-    if (event.googleEventId || event.processed) {
-      console.log(`Skipping event "${event.title}" - GoogleEventId or Processed status already set.`);
-      noChange.push(event.title);
-      processedRecordIds.add(event.id);
-      continue;
-    }
-
-    try {
-      await lockAirtableRecord(event.id);
-      let googleEventId = await checkForDuplicateEvent(event, calendarId, session);
-
-      if (isTerminated) {
-        console.log("🛑 Termination detected. Skipping event creation.");
-        return;
-      }
-
-      if (googleEventId) {
-        const googleEvent = await getGoogleCalendarEvent(googleEventId, calendarId, session);
-
-        // Skip updates if no changes exist
-        if (!isEventDifferent(event, googleEvent)) {
-          console.log(`✅ No changes detected for event "${event.title}". Skipping update.`);
-          noChange.push(event.title);
-          processedRecordIds.add(event.id);
-          await unlockAirtableRecord(event.id);
-          continue;
-        }
-
-        console.log(`⚠️ Updating event "${event.title}" as it has changed.`);
-        await updateGoogleCalendarEvent(
-          googleEventId,
-          event.title,
-          event.start,
-          event.end,
-          calendarId,
-          session
-        );
-        await updateAirtableWithGoogleEventIdAndProcessed(event.id, googleEventId, true);
-      } else {
-        console.log(`🆕 Creating new event: ${event.title}`);
-        googleEventId = await createGoogleCalendarEvent(event, calendarId, session);
-        if (googleEventId) {
-          await updateAirtableWithGoogleEventIdAndProcessed(event.id, googleEventId, true);
-          added.push(event.title);
-          createdEventsCount++;
-        } else {
-          failed.push(event.title);
-        }
-      }
-
-      processedRecordIds.add(event.id);
-    } catch (error) {
-      console.error(`❌ Error processing event "${event.title}":`, error);
-      failed.push(event.title);
-    }
-
-    await unlockAirtableRecord(event.id);
-    await sleep(12000); // Delay to avoid hitting rate limits
-  }
-
-  if (isTerminated) {
-    console.log("🛑 All records processed but script was terminated.");
-    return;
-  }
-
-  setAddedRecords((prev) => [...prev, ...added]);
-  setFailedRecords((prev) => [...prev, ...failed]);
-  setNoChangeRecords(noChange);
-
-  console.log(`✅ Total number of events created: ${createdEventsCount}`);
-  console.log(`✅ Total number of records processed for calendar "${calendarName}": ${processedRecordIds.size}`);
-}
-
-function isEventDifferent(airtableEvent, googleEvent) {
-  if (!airtableEvent || !googleEvent || !googleEvent.start || !googleEvent.end) {
-      console.error('❌ Missing event data:', { airtableEvent, googleEvent });
-      return true; 
-  }
-
-  const normalizeText = (text) => (text || "").trim().toLowerCase();
-  
-  return (
-      normalizeText(airtableEvent.title) !== normalizeText(googleEvent.summary) ||
-      normalizeText(airtableEvent.location) !== normalizeText(googleEvent.location) ||
-      new Date(airtableEvent.start).toISOString() !== googleEvent.start.dateTime ||
-      new Date(airtableEvent.end).toISOString() !== googleEvent.end.dateTime
-  );
-
-}
-
-
-
-async function updateGoogleCalendarEvent(eventId, title, start, end, calendarId) {
+async function updateGoogleCalendarEvent(eventId, title, start, end, calendarId, accessToken, attendeeEmail = null) {
   console.log(`🔄 Updating event: ${title}`);
 
-  // ✅ Get a fresh valid access token
-  const accessToken = await getValidAccessToken();
   if (!accessToken) {
-      console.error("❌ No valid access token available. Skipping update.");
-      return;
+    console.error("❌ No valid access token available.");
+    return;
   }
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
 
   try {
-      // Fetch the original event details before updating
-      const originalResponse = await fetch(url, {
-          method: 'GET',
-          headers: {
-              Authorization: `Bearer ${accessToken}`,
-              'Content-Type': 'application/json',
-          },
-      });
-
-      if (!originalResponse.ok) {
-          const errorData = await originalResponse.json();
-          console.error('❌ Failed to fetch original Google Calendar event:', errorData);
-          return;
-      }
-
-      const originalEvent = await originalResponse.json();
-      const originalStart = originalEvent.start?.dateTime || originalEvent.start?.date;
-      const originalEnd = originalEvent.end?.dateTime || originalEvent.end?.date;
-      const originalTimeZone = originalEvent.start?.timeZone || "America/New_York";
-
-      // Convert to strict ISO format
-      const normalizeToISO = (dateStr) => (dateStr ? new Date(dateStr).toISOString() : null);
-      const normalizedOriginalStart = normalizeToISO(originalStart);
-      const normalizedOriginalEnd = normalizeToISO(originalEnd);
-      const normalizedNewStart = normalizeToISO(start);
-      const normalizedNewEnd = normalizeToISO(end);
-
-      console.log("🔵 Original Event Data:", {
-          title: originalEvent.summary,
-          start: normalizedOriginalStart,
-          end: normalizedOriginalEnd,
-          timeZone: originalTimeZone,
-      });
-
-      console.log("🟡 Updated Event Data:", {
-          summary: title,
-          start: normalizedNewStart,
-          end: normalizedNewEnd,
-          timeZone: originalTimeZone,
-      });
-
-      // ✅ Skip update if nothing has changed
-      if (normalizedNewStart === normalizedOriginalStart && normalizedNewEnd === normalizedOriginalEnd) {
-          console.log("✅ No change detected. Skipping update.");
-          return;
-      }
-
-      console.log("⚠️ Changes detected. Updating event...");
-
-      // Construct updated event object
-      const updatedEvent = {
-          summary: title,
-          start: { dateTime: normalizedNewStart, timeZone: originalTimeZone },
-          end: { dateTime: normalizedNewEnd, timeZone: originalTimeZone },
-      };
-
-      const updateResponse = await fetch(url, {
-          method: 'PUT',
-          headers: {
-              Authorization: `Bearer ${accessToken}`,
-              'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(updatedEvent),
-      });
-
-      if (!updateResponse.ok) {
-          console.error("❌ Failed to update event:", await updateResponse.json());
-          return;
-      }
-
-      console.log(`✅ Event updated successfully: ${title}`);
-  } catch (error) {
-      console.error('❌ Error updating event:', error);
-  }
-}
-
-
-
-async function getGoogleCalendarEvent(eventId, calendarId, session) {
-  // Fetch the token from the backend
-  const tokenResponse = await fetch('http://localhost:5001/api/tokens');
-  
-  if (!tokenResponse.ok) {
-    console.error("Failed to fetch token");
-    return null;
-  }
-
-  const tokens = await tokenResponse.json();
-  const accessToken = tokens.access_token;
-
-  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
-  try {
-    const response = await fetch(url, {
+    const originalResponse = await fetch(url, {
+      method: 'GET',
       headers: {
         Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
       },
     });
 
+    if (!originalResponse.ok) {
+      const errorData = await originalResponse.json();
+      console.error('❌ Failed to fetch original Google Calendar event:', errorData);
+      return;
+    }
+
+    const originalEvent = await originalResponse.json();
+
+    const updatedEvent = {
+      summary: title,
+      start: {
+        dateTime: new Date(start).toISOString(),
+        timeZone: originalEvent.start?.timeZone || "America/New_York",
+      },
+      end: {
+        dateTime: new Date(end).toISOString(),
+        timeZone: originalEvent.end?.timeZone || "America/New_York",
+      },
+      attendees: attendeeEmail ? [{ email: attendeeEmail }] : [], // ✅ Include updated attendees
+    };
+
+    const updateResponse = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(updatedEvent),
+    });
+
+    if (!updateResponse.ok) {
+      console.error("❌ Failed to update event:", await updateResponse.json());
+      return;
+    }
+
+    console.log(`✅ Event updated with attendees: ${title}`);
+  } catch (error) {
+    console.error('❌ Error updating event:', error);
+  }
+}
+
+async function getAnyValidAccessToken(session) {
+  let accessToken = session?.provider_token || localStorage.getItem("accessToken");
+
+  if (!accessToken) {
+    try {
+      const tokenResponse = await fetch('http://localhost:5001/api/tokens');
+      if (tokenResponse.ok) {
+        const tokens = await tokenResponse.json();
+        accessToken = tokens.access_token;
+        console.log("✅ Token fetched from backend.");
+      } else {
+        console.warn("⚠️ Could not retrieve token from backend.");
+      }
+    } catch (error) {
+      console.warn("⚠️ Backend unavailable for token fetch:", error.message);
+    }
+  }
+
+  if (!accessToken) {
+    console.error("❌ No access token available.");
+  }
+
+  return accessToken;
+}
+
+async function getGoogleCalendarEvent(eventId, calendarId, session) {
+  const accessToken = await getAnyValidAccessToken(session);
+  if (!accessToken) return null;
+
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
+
+  try {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
     if (!response.ok) {
-      console.error(`Failed to fetch event from Google Calendar: ${eventId}`);
+      console.error(`❌ Failed to fetch event from Google Calendar (${response.status})`);
       return null;
     }
 
-    const data = await response.json();
-    return data;
+    return await response.json();
   } catch (error) {
-    console.error('Error fetching Google Calendar event:', error);
+    console.error('❌ Error fetching Google Calendar event:', error);
     return null;
   }
 }
 
-
-
 async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
-  // Fetch the token from the backend
-  const tokenResponse = await fetch('http://localhost:5001/api/tokens');
-  
-  if (!tokenResponse.ok) {
-    console.error("Failed to fetch token");
-    return false;
-  }
-
-  const tokens = await tokenResponse.json();
-  const accessToken = tokens.access_token;
+  const accessToken = await getAnyValidAccessToken(session);
+  if (!accessToken) return false;
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
 
@@ -727,10 +535,15 @@ async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
     const response = await fetch(url, {
       method: 'DELETE',
       headers: {
-        Authorization: `Bearer ${accessToken}`,  // Use the fetched access token
+        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
     });
+
+    if (response.status === 410) {
+      console.warn(`Event ${eventId} already deleted (410 Gone). Skipping.`);
+      return true;
+    }
 
     if (!response.ok) {
       const data = await response.json();
@@ -744,124 +557,6 @@ async function deleteGoogleCalendarEvent(eventId, calendarId, session) {
     console.error('Error deleting Google Calendar event:', error);
     return false;
   }
-}
-
-
-function CalendarSection({
-  calendarId,
-  calendarName,
-  session,
-  signOut,
-  setAddedRecords,
-  setFailedRecords,
-  setNoChangeRecords,
-    triggerSync,
-  setTriggerSync,
-  handleSyncNow,  // Add the handleSyncNow prop here
-  allRecordsProcessed,  // Destructure this prop
-  setAllRecordsProcessed  // Destructure this prop
-}) {
-  const [lastSyncTime, setLastSyncTime] = useState(null);
-  const [progress, setProgress] = useState(0);
-  const [manualSyncComplete, setManualSyncComplete] = useState(false); // Track manual sync completion
-
-  useEffect(() => {
-    const syncEvents = async () => {
-      // Exit if all records are processed
-      if (allRecordsProcessed) {
-        console.log('All records have been processed. Skipping further sync attempts.');
-        terminateScript(); // Terminate the script before returning
-        return;  // Exit the function after terminating
-      }
-  
- 
-  
-      console.log('Attempting to sync events...');
-  
-      if (session && triggerSync) {
-        setProgress(0);
-  
-        if (!session.provider_token) {
-          console.error('No valid session token found. Logging out.');
-          signOut();
-          return;
-        }
-  
-        try {
-          // Sync the events with Google Calendar
-          await populateGoogleCalendarWithAirtableRecords(
-            calendarId,
-            calendarName,
-            session,
-            setAddedRecords,
-            setFailedRecords,
-            setNoChangeRecords,
-            setAllRecordsProcessed
-          );
-  
-          console.log(`Finished syncing events to Google Calendar "${calendarName}"`);
-  
-          // After syncing, check for duplicates
-          await removeDuplicateEvents();
-  
-          // Set the last sync time and other status updates
-          setLastSyncTime(new Date());
-          setTriggerSync(false);
-          setManualSyncComplete(true);  // Mark manual sync as complete
-  
-        } catch (error) {
-          console.error(`Error syncing Airtable to Google Calendar "${calendarName}":`, error);
-        }
-      }
-    };
-  
-    // Only proceed if manual sync is triggered
-    if (triggerSync) {
-      console.log(`Manual sync triggered for calendar: ${calendarName}`);
-      syncEvents(); // Call the async syncEvents function
-    }
-  
-  }, [
-    session, // React hook dependencies
-    signOut,
-    calendarId,
-    calendarName,
-    setAddedRecords,
-    setFailedRecords,
-    setNoChangeRecords,
-    setAllRecordsProcessed,
-    triggerSync, // Trigger sync when this changes
-    setTriggerSync,
-    allRecordsProcessed, // Terminate if all records are processed
-  ]);
-
-  // After syncing Google Calendar
-  useEffect(() => {
-    if (manualSyncComplete) {
-      console.log("Manual sync complete. Stopping further checks.");
-      return; // Terminate further event checks after sync
-    }
-
-    // Continue with other operations if needed
-  }, [manualSyncComplete]); // Dependency on manual sync completion
-
-  return (
-    <div className="calendar-item">
-      <h2>{calendarName}</h2>
-
-      {lastSyncTime && <p>Last sync: {lastSyncTime.toLocaleString()}</p>}
-      {progress > 0 && <p>Sync progress: {progress.toFixed(0)}%</p>}
-  
-    
-  
-  <button onClick={handleSyncNow}>Sync Now</button>
-
-
-{allRecordsProcessed && (
-  <p>All records have been processed. No further syncs are required.</p>
-)}
-    </div>
-  );
 }
 
 async function removeDuplicateEvents(calendarId, session) {
@@ -914,9 +609,6 @@ async function removeDuplicateEvents(calendarId, session) {
   }
 }
 
-
-
-
 function formatCountdown(seconds) {
   const minutes = Math.floor(seconds / 60);
   const secs = seconds % 60;
@@ -926,15 +618,45 @@ function formatCountdown(seconds) {
 function App() {
   const calendarMap = {
     Savannah: 'c_ebe1fcbce1be361c641591a6c389d4311df7a97961af0020c889686ae059d20a@group.calendar.google.com',
-    Charleston: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com',
+   Charleston: 'c_d113e252e0e5c8cfbf17a13149707a30d3c0fbeeff1baaac7a46940c2cc448ca@group.calendar.google.com',
     Greensboro: 'c_03867438b82e5dfd8d4d3b6096c8eb1c715425fa012054cc95f8dea7ef41c79b@group.calendar.google.com',
     MyrtleBeach: 'c_ad562073f4db2c47279af5aa40e53fc2641b12ad2497ccd925feb220a0f1abee@group.calendar.google.com',
-    Wilmington: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com',
-   Grenville: 'c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf@group.calendar.google.com',
-   Columbia: 'c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515@group.calendar.google.com',
-       Raleigh: 'warranty@vanirinstalledsales.com',
-       Charlotte: 'warranty.charlotte@vanirinstalledsales.com',
+   Wilmington: 'c_45db4e963c3363676038697855d7aacfd1075da441f9308e44714768d4a4f8de@group.calendar.google.com',
+  Grenville: 'c_0476130ac741b9c58b404c737a8068a8b1b06ba1de2a84cff08c5d15ced54edf@group.calendar.google.com',
+  Columbia: 'c_df033dd6c81bb3cbb5c6fdfd58dd2931e145e061b8a04ea0c13c79963cb6d515@group.calendar.google.com',
+     Raleigh: 'warranty@vanirinstalledsales.com',
+      Charlotte: 'c_424688691b4dace071516f7adb111ca9e74a5b290f11d33912bacfa933477bcc@group.calendar.google.com',
   };
+
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash && hash.includes("access_token")) {
+      const params = new URLSearchParams(hash.substring(1));
+      const token = params.get("access_token");
+  
+      if (token) {
+        localStorage.setItem("accessToken", token);
+        fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        })
+          .then((res) => res.json())
+          .then((userInfo) => {
+            const email = userInfo.email;
+            if (email.endsWith("@vanirinstalledsales.com")) {
+              console.log("✅ Logged in:", email);
+              localStorage.setItem("userEmail", email);
+              // Proceed with rest of your app logic
+            } else {
+              alert("❌ Unauthorized. You must use a @vanirinstalledsales.com account.");
+              localStorage.removeItem("accessToken");
+            }
+          });
+      }
+    }
+  }, []);
+  
 
   // ✅ Automatically refresh token every 55 minutes
 useEffect(() => {
@@ -964,11 +686,11 @@ useEffect(() => {
     const nextTenMinuteMark = new Date(now);
     
     // Calculate the next 10-minute interval from the beginning of the hour
-    nextTenMinuteMark.setMinutes(Math.ceil(now.getMinutes() / 10) * 10, 0, 0);
+    nextTenMinuteMark.setMinutes(Math.ceil(now.getMinutes() / 5) * 5, 0, 0);
 
     // If we're already at the next 10-minute mark, move to the next one
     if (nextTenMinuteMark <= now) {
-        nextTenMinuteMark.setMinutes(nextTenMinuteMark.getMinutes() + 10);
+        nextTenMinuteMark.setMinutes(nextTenMinuteMark.getMinutes() + 5);
     }
 
     return Math.max(0, Math.floor((nextTenMinuteMark - now) / 1000)); // Return remaining time in seconds
@@ -986,186 +708,175 @@ useEffect(() => {
     )
   );
 
+// ✅ THIS IS WHERE YOU ADD IT
+useEffect(() => {
+  const params = new URLSearchParams(window.location.search);
+  const authCode = params.get("code");
 
+  if (authCode) {
+    fetch("http://localhost:5001/api/exchange-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: authCode }),
+    })
+    .then(res => res.json())
+    .then(data => {
+      console.log("🔐 Tokens from backend:", data);
+      localStorage.setItem("accessToken", data.access_token);
+      localStorage.setItem("refreshToken", data.refresh_token);
+      localStorage.setItem("tokenExpiry", (Date.now() + data.expires_in * 1000).toString());
 
-  function isEventDifferent(airtableEvent, googleEvent) {
-    const isTitleDifferent = airtableEvent.title !== googleEvent.summary;
-    const isStartDifferent = new Date(airtableEvent.start).toISOString() !== googleEvent.start.dateTime;
-    const isEndDifferent = new Date(airtableEvent.end).toISOString() !== googleEvent.end.dateTime;
-    const isDescriptionDifferent = (airtableEvent.description || '') !== (googleEvent.description || '');
-    const isLocationDifferent = (airtableEvent.location || '') !== (googleEvent.location || '');
+      // Optionally clean up the URL so ?code= disappears after it's handled
+      window.history.replaceState({}, document.title, window.location.pathname);
+    });
+  }
+}, []);
+
+function isEventDifferent(airtableEvent, googleEvent) {
+  const normalize = (str) => String(str || "").trim().toLowerCase();
+
+  const airtableTitle = normalize(airtableEvent.title);
+  const googleTitle = normalize(googleEvent.summary);
+
+  const airtableLocation = normalize(airtableEvent.location);
+  const googleLocation = normalize(googleEvent.location);
+
+  const airtableDescription = normalize(airtableEvent.description);
+  const googleDescription = normalize(googleEvent.description);
+
+  const airtableStart = new Date(airtableEvent.start).toISOString();
+  const googleStart = googleEvent.start?.dateTime || googleEvent.start?.date;
+
+  const airtableEnd = new Date(airtableEvent.end).toISOString();
+  const googleEnd = googleEvent.end?.dateTime || googleEvent.end?.date;
+
+  const differences = [];
+
+  if (airtableTitle !== googleTitle) {
+    differences.push("Title");
+  }
+  if (airtableLocation !== googleLocation) {
+    differences.push("Location");
+  }
+  if (airtableDescription !== googleDescription) {
+    differences.push("Description");
+  }
+  if (airtableStart !== googleStart) {
+    differences.push("Start Time");
+  }
+  if (airtableEnd !== googleEnd) {
+    differences.push("End Time");
+  }
+
+  // ✅ Check if Field Manager Email is present and included in Google attendees
+  const airtableAttendee = normalize(airtableEvent.fieldManagerEmail || "");
+  const googleAttendees = (googleEvent.attendees || []).map(a => normalize(a.email));
+  const attendeeMissing = airtableAttendee && !googleAttendees.includes(airtableAttendee);
+
+  if (attendeeMissing) {
+    differences.push("Attendee Missing");
+  }
+
+  console.log("🔍 Comparing Airtable vs Google Event:");
+  console.table({
+    Title: { Airtable: airtableTitle, Google: googleTitle },
+    Location: { Airtable: airtableLocation, Google: googleLocation },
+    Description: { Airtable: airtableDescription, Google: googleDescription },
+    Start: { Airtable: airtableStart, Google: googleStart },
+    End: { Airtable: airtableEnd, Google: googleEnd },
+    Attendee: {
+      Airtable: airtableAttendee || "(none)",
+      Google: googleAttendees.join(", ") || "(none)"
+    }
+  });
+
+  if (differences.length > 0) {
+    console.log(`⚠️ Differences detected in: ${differences.join(", ")}`);
+    return true;
+  }
+
+  console.log("✅ No differences found. Event is up to date.");
+  return false;
+}
+
+  async function fetchGoogleCalendarEvents(calendarId, session) {
+    const accessToken = await getAnyValidAccessToken(session);
+    if (!accessToken) return [];
   
-    return isTitleDifferent || isStartDifferent || isEndDifferent || isDescriptionDifferent || isLocationDifferent;
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+  
+    const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${startOfToday.toISOString()}&maxResults=250&orderBy=startTime&singleEvents=true`;
+  
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+  
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error('❌ Failed to fetch events from Google Calendar:', errorData);
+        return [];
+      }
+  
+      const data = await response.json();
+      console.log(`✅ Fetched ${data.items?.length || 0} events from Google Calendar.`);
+      return data.items || [];
+    } catch (error) {
+      console.error('❌ Error fetching Google Calendar events:', error.message);
+      return [];
+    }
   }
   
+  async function getAnyValidAccessToken(session) {
+    let accessToken = session?.provider_token || localStorage.getItem("accessToken");
   
-  async function fetchGoogleCalendarEvents(calendarId) {
-    let accessToken = await getValidAccessToken(); // Get a valid token from storage or refresh
-
+    // Try to fallback to backend if not available
     if (!accessToken) {
-        console.error("❌ No valid access token available. Aborting fetch.");
-        return [];
+      try {
+        const tokenResponse = await fetch('http://localhost:5001/api/tokens');
+        if (tokenResponse.ok) {
+          const tokens = await tokenResponse.json();
+          accessToken = tokens.access_token;
+          console.log("✅ Token fetched from backend.");
+        } else {
+          console.warn("⚠️ Could not retrieve token from backend.");
+        }
+      } catch (error) {
+        console.warn("⚠️ Backend unavailable for token fetch:", error.message);
+      }
     }
-
-    console.log("📅 Fetching Google Calendar events with token:", accessToken);
-
-    try {
-        const response = await fetch(
-            `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${new Date().toISOString()}&maxResults=250&orderBy=startTime&singleEvents=true`,
-            {
-                method: "GET",
-                headers: {
-                    "Authorization": `Bearer ${accessToken}`,
-                    "Content-Type": "application/json",
-                },
-            }
-        );
-
-        if (!response.ok) {
-            const errorResponse = await response.json();
-
-            if (errorResponse.error.code === 401) {
-                console.warn("🔄 Access token expired. Attempting to refresh...");
-
-                // Refresh the token and retry once
-                const newAccessToken = await refreshAccessToken();
-                if (newAccessToken) {
-                    console.log("🔄 Retrying event fetch with new token...");
-                    return await fetchGoogleCalendarEvents(calendarId); // Recursive retry
-                } else {
-                    console.error("❌ Failed to refresh token. User may need to re-authenticate.");
-                    return [];
-                }
-            }
-
-            console.error("❌ Google Calendar API Error:", errorResponse);
-            throw new Error(errorResponse.error.message);
-        }
-
-        const data = await response.json();
-        console.log(`✅ Successfully fetched ${data.items.length} events.`);
-        return data.items || []; // Ensure an empty array is returned if no events exist
-    } catch (error) {
-        console.error("❌ Failed to fetch Google Calendar events:", error.message);
-        return [];
+  
+    if (!accessToken) {
+      console.error("❌ No access token available.");
     }
-}
-
-
-
   
-  
+    return accessToken;
+  }
 
-  
-  
-  
-  
-  async function updateGoogleCalendarEvent(eventId, title, start, end, calendarId) {
-    try {
-        const accessToken = await getValidAccessToken();
-        if (!accessToken) {
-            console.error("❌ No valid access token available.");
-            return;
-        }
-
-        const url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`;
-
-        // 🟢 Fetch the original event before updating
-        const originalResponse = await fetch(url, {
-            method: 'GET',
-            headers: {
-                Authorization: `Bearer ${accessToken}`,
-                'Content-Type': 'application/json',
-            },
-        });
-
-        if (!originalResponse.ok) {
-            console.error("❌ Failed to fetch original Google Calendar event.");
-            return;
-        }
-
-        const originalEvent = await originalResponse.json();
-        const originalStart = originalEvent.start?.dateTime || originalEvent.start?.date;
-        const originalEnd = originalEvent.end?.dateTime || originalEvent.end?.date;
-        const originalTimeZone = originalEvent.start?.timeZone || "America/New_York"; // Default to EST
-
-        // ✅ Normalize all times to strict ISO format
-        const normalizeToISO = (dateStr) => dateStr ? new Date(dateStr).toISOString() : null;
-        const normalizedOriginalStart = normalizeToISO(originalStart);
-        const normalizedOriginalEnd = normalizeToISO(originalEnd);
-        const normalizedNewStart = normalizeToISO(start);
-        const normalizedNewEnd = normalizeToISO(end);
-
-        console.log("🔵 Original Event (Before Update):", {
-            summary: originalEvent.summary,
-            start: normalizedOriginalStart,
-            end: normalizedOriginalEnd,
-            timeZone: originalTimeZone,
-        });
-
-        console.log("🟡 Updated Event Data (Before Sending):", {
-            summary: title,
-            start: normalizedNewStart,
-            end: normalizedNewEnd,
-            timeZone: originalTimeZone,
-        });
-
-        // 🛑 Prevent unnecessary updates if times are unchanged
-        if (normalizedNewStart === normalizedOriginalStart && normalizedNewEnd === normalizedOriginalEnd) {
-            console.log("✅ No changes detected. Skipping update.");
-            return;
-        }
-
-        console.log("⚠️ Change detected. Updating event...");
-
-        // 🔄 Prepare the updated event payload
-        const updatedEvent = {
-            summary: title,
-            start: { dateTime: normalizedNewStart, timeZone: originalTimeZone },
-            end: { dateTime: normalizedNewEnd, timeZone: originalTimeZone },
-        };
-
-        const options = {
-            method: 'PATCH',
-            headers: {
-                Authorization: `Bearer ${accessToken}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(updatedEvent),
-        };
-
-        // ✅ Handle API rate limits by retrying on failure
-        const apiResponse = await fetchWithRetry(url, options);
-        if (!apiResponse) {
-            console.error("❌ Failed to update Google Calendar event after retries.");
-            return;
-        }
-
-        console.log(`✅ Successfully updated event: ${title}`);
-    } catch (error) {
-        console.error("❌ Error updating Google Calendar event:", error);
-    }
-}
 async function fetchWithRetry(url, options, retries = 3, delay = 2000) {
   for (let attempt = 1; attempt <= retries; attempt++) {
-      try {
-          const response = await fetch(url, options);
-          if (response.ok) return response;
+    try {
+      const response = await fetch(url, options);
+      if (response.ok) return response;
 
-          console.warn(`⚠️ API call failed (Attempt ${attempt}/${retries}): ${response.statusText}`);
-          if (response.status === 429) {
-              console.log("⏳ Rate limit hit. Retrying after delay...");
-              await new Promise(resolve => setTimeout(resolve, delay));
-          } else {
-              return null; // Stop retrying on other errors
-          }
-      } catch (error) {
-          console.error("❌ API request error:", error);
+      console.warn(`⚠️ API call failed (Attempt ${attempt}/${retries}): ${response.statusText}`);
+      if (response.status === 429) {
+        console.log("⏳ Rate limit hit. Retrying after delay...");
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        return null;
       }
+    } catch (error) {
+      console.error("❌ API request error:", error);
+    }
   }
   return null;
 }
-
 
 useEffect(() => {
     const getTimeUntilNextQuarterHour = () => {
@@ -1173,11 +884,11 @@ useEffect(() => {
         const nextSyncTime = new Date(now);
 
         // Calculate the next 10-minute interval from the beginning of the hour
-        nextSyncTime.setMinutes(Math.ceil(now.getMinutes() / 10) * 10, 0, 0);
+        nextSyncTime.setMinutes(Math.ceil(now.getMinutes() / 5) * 5, 0, 0);
 
         // If we're already at the next 10-minute mark, move to the next one
         if (nextSyncTime <= now) {
-            nextSyncTime.setMinutes(nextSyncTime.getMinutes() + 10);
+            nextSyncTime.setMinutes(nextSyncTime.getMinutes() + 5);
         }
 
         return Math.max(0, Math.floor((nextSyncTime - now) / 1000)); // Return remaining time in seconds
@@ -1210,8 +921,6 @@ useEffect(() => {
     return () => clearInterval(interval);
 }, [session]); // Depend on session to ensure proper reactivity
 
-  
-
 async function handleLogin() {
   try {
       const { data, error } = await supabase.auth.signInWithOAuth({
@@ -1234,10 +943,9 @@ async function handleLogin() {
   }
 }
 
-
 async function saveTokensToBackend(tokens) {
   try {
-      const response = await fetch("http://localhost:5001/save-tokens", {
+    const response = await tryFetchServer("http://localhost:5001/api/refresh-token", {
           method: "POST",
           headers: {
               "Content-Type": "application/json",
@@ -1274,9 +982,31 @@ async function handleAuthSuccess(session) {
   await saveTokensToBackend(tokens);
 }
 
-
-
+function LoginButton() {
+  const login = () => {
+    const CLIENT_ID = '882687108659-vqkr605rdsgesl5h348l07o0um11rjjg.apps.googleusercontent.com';
+    const REDIRECT_URI =
+      window.location.hostname === "localhost"
+        ? "http://localhost:3000/oauth2callback"
+        : "https://warrentycalender.vanirinstalledsales.info/oauth2callback";
   
+    const BACKEND_BASE_URL =
+      window.location.hostname === "localhost"
+        ? "http://localhost:5001"
+        : "https://api.warrentycalender.vanirinstalledsales.info";
+  
+    const SCOPE = "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.email";
+    const RESPONSE_TYPE = "code";
+  
+    const googleLoginUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=${RESPONSE_TYPE}&scope=${encodeURIComponent(SCOPE)}&access_type=offline&prompt=consent`;
+  
+    window.location.href = googleLoginUrl;
+  };
+  
+
+  return <button onClick={login}>Sign in with Google</button>;
+}
+
   const handleLogout = async () => {
     try {
       const { error } = await supabase.auth.refreshSession();
@@ -1290,7 +1020,6 @@ async function handleAuthSuccess(session) {
     }
   };
   
-
   async function fetchAndProcessEvents() {
     try {
         console.log("🚀 Fetching and processing events for all calendars...");
@@ -1327,9 +1056,19 @@ async function handleAuthSuccess(session) {
                 console.log(`📊 Fetched ${googleCalendarEvents.length} events from Google Calendar: ${calendarName}`);
 
                 const googleEventMap = new Map();
+
                 googleCalendarEvents.forEach((event) => {
-                    googleEventMap.set(event.summary?.toLowerCase().trim(), event);
+                    const normalizedTitle = (event.summary || '').toLowerCase().trim().replace(/\s+/g, ' ');
+                    const normalizedStart = event.start?.dateTime
+                        ? new Date(event.start.dateTime).toISOString()
+                        : event.start?.date
+                            ? new Date(event.start.date).toISOString()
+                            : '';
+                
+                    const key = `${normalizedTitle}_${normalizedStart}`;
+                    googleEventMap.set(key, event);
                 });
+                
 
                 let addedEvents = [];
 
@@ -1339,20 +1078,27 @@ async function handleAuthSuccess(session) {
                         continue;
                     }
 
-                    const eventTitle = airtableEvent.title.toLowerCase().trim();
-                    const matchingGoogleEvent = googleEventMap.get(eventTitle);
+                    const normalizedAirtableTitle = (airtableEvent.title || '').toLowerCase().trim().replace(/\s+/g, ' ');
+                    const normalizedAirtableStart = airtableEvent.start
+                        ? new Date(airtableEvent.start).toISOString()
+                        : '';
+                    const eventKey = `${normalizedAirtableTitle}_${normalizedAirtableStart}`;
+                    const matchingGoogleEvent = googleEventMap.get(eventKey);
+                    
 
                     if (matchingGoogleEvent) {
                         if (isEventDifferent(airtableEvent, matchingGoogleEvent)) {
                             console.log(`🔄 Updating event: ${airtableEvent.title}`);
                             await updateGoogleCalendarEvent(
-                                matchingGoogleEvent.id,
-                                airtableEvent.title,
-                                airtableEvent.start,
-                                airtableEvent.end,
-                                calendarId,
-                                accessToken
+                              matchingGoogleEvent.id,
+                              airtableEvent.title,
+                              airtableEvent.start,
+                              airtableEvent.end,
+                              calendarId,
+                              accessToken,
+                              airtableEvent.fieldManagerEmail // ✅ pass this in
                             );
+                            
                         } else {
                             console.log(`✅ No changes detected for event: ${airtableEvent.title}, skipping update.`);
                         }
@@ -1401,85 +1147,89 @@ async function handleAuthSuccess(session) {
     }
 }
 
-
-
-
-
-
-
-
 return (
-  <div className="App">
+  <div className="App" style={{ padding: '20px', fontFamily: 'Arial, sans-serif' }}>
     <h1>Google Calendar Sync</h1>
-    
-    <p>Next sync in: {formatCountdown(countdown)}</p>
-    {!session ? (
-                <button onClick={getValidAccessToken}>Sign in with Google</button>
-              ) : (
-      <button onClick={handleLogout}>Logout</button>
-    )}
-    {session && (
-      <>
-        <button onClick={fetchAndProcessEvents}>Sync Now</button>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '20px' }}>
-          {Object.entries(calendarEvents).map(([calendarName, events]) => {
-            const added = events?.added || [];
-            const updated = events?.updated || [];
 
-            return (
-              <div key={calendarName} className="calendar-section">
-              <h2>{calendarName}</h2>
-            
-              {added.length > 0 && (
-                <>
-                  <h3>New Events</h3>
-                  <ul>
-                    {added.map((event, index) => {
-                      // Ensure proper date conversion
-                      const eventStart = event.start ? new Date(event.start).toLocaleString() : "Invalid Date";
-                      const eventEnd = event.end ? new Date(event.end).toLocaleString() : "Invalid Date";
-            
-                      return (
-                        <li key={index}>
-                          <strong>{event.title}</strong> <br />
-                          <span>Start: {isNaN(new Date(event.start)) ? "Invalid Date" : eventStart}</span> <br />
-                          <span>End: {isNaN(new Date(event.end)) ? "Invalid Date" : eventEnd}</span>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </>
-              )}
-            
-              {updated.length > 0 && (
-                <>
-                  <h3>Updated Events</h3>
-                  <ul>
-                    {updated.map((event, index) => {
-                      const eventStart = event.start ? new Date(event.start).toLocaleString() : "Invalid Date";
-                      const eventEnd = event.end ? new Date(event.end).toLocaleString() : "Invalid Date";
-            
-                      return (
-                        <li key={index}>
-                          <strong>{event.title}</strong> <br />
-                          <span>Start: {isNaN(new Date(event.start)) ? "Invalid Date" : eventStart}</span> <br />
-                          <span>End: {isNaN(new Date(event.end)) ? "Invalid Date" : eventEnd}</span>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </>
-              )}
-            
-              {added.length === 0 && updated.length === 0 && <p>No new or updated events.</p>}
-            </div>
-            
-            
-            );
-          })}
-        </div>
-      </>
-    )}
+    {/* 🔐 Google Sign In */}
+    <LoginButton />
+
+
+    <p>Next sync in: {formatCountdown(countdown)}</p>
+
+    <button onClick={fetchAndProcessEvents} style={{ margin: '10px 0' }}>
+      Sync Now
+    </button>
+
+    {/* Calendar Display */}
+    <div
+      className="calendar-grid"
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+        gap: '20px',
+        marginTop: '20px',
+      }}
+    >
+      {Object.entries(calendarEvents).map(([calendarName, events]) => {
+        const added = events?.added || [];
+        const updated = events?.updated || [];
+
+        return (
+          <div
+            key={calendarName}
+            className="calendar-section"
+            style={{ border: '1px solid #ccc', borderRadius: '8px', padding: '15px' }}
+          >
+            <h2>{calendarName}</h2>
+
+            {added.length > 0 && (
+              <>
+                <h3>New Events</h3>
+                <ul>
+                  {added.map((event, index) => {
+                    const eventStart = event.start ? new Date(event.start).toLocaleString() : "Invalid Date";
+                    const eventEnd = event.end ? new Date(event.end).toLocaleString() : "Invalid Date";
+
+                    return (
+                      <li key={index}>
+                        <strong>{event.title}</strong><br />
+                        <span>Start: {eventStart}</span><br />
+                        <span>End: {eventEnd}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
+
+            {updated.length > 0 && (
+              <>
+                <h3>Updated Events</h3>
+                <ul>
+                  {updated.map((event, index) => {
+                    const eventStart = event.start ? new Date(event.start).toLocaleString() : "Invalid Date";
+                    const eventEnd = event.end ? new Date(event.end).toLocaleString() : "Invalid Date";
+
+                    return (
+                      <li key={index}>
+                        <strong>{event.title}</strong><br />
+                        <span>Start: {eventStart}</span><br />
+                        <span>End: {eventEnd}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
+
+            {added.length === 0 && updated.length === 0 && (
+              <p>No new or updated events.</p>
+            )}
+          </div>
+        );
+      })}
+    </div>
   </div>
 );
 }
